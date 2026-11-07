@@ -4,7 +4,12 @@
 #   phase 2  implementers  one headless session per work package, in parallel, own branch + worktree
 #   phase 3  integrator    merges the work packages, wires session/API/cmd, drives the gate
 #
-#   harness/prompts/run-fanout.sh <milestone> [arch-budget] [wp-budget] [integrator-budget]
+#   harness/prompts/run-fanout.sh [--from-phase 2|3] <milestone> [arch-budget] [wp-budget] [integrator-budget]
+#
+# --from-phase 2 reuses a finished architect phase (branch impl/m<N>-c and its
+# worktree must exist, with a committed plan) and reruns implementers +
+# integrator; existing work-package branches/worktrees are discarded first.
+# --from-phase 3 reruns only the integrator on the existing work-package branches.
 #
 # Branches: impl/m<N>-c (architect + integration), impl/m<N>-c-<wp> (work packages).
 # Worktrees: ../<repo>-m<N>c and ../<repo>-m<N>c-<wp>. Transcripts and timing per
@@ -14,7 +19,9 @@ set -euo pipefail
 # in-flight responses ("Your computer went to sleep mid-response"). Lid-close
 # sleep can't be prevented this way; keep the lid open (or use clamshell on power).
 AWAKE=(); command -v caffeinate >/dev/null && AWAKE=(caffeinate -ims)
-MS="${1:?usage: run-fanout.sh <milestone> [arch-budget] [wp-budget] [integrator-budget]}"
+FROM=1
+if [ "${1:-}" = "--from-phase" ]; then FROM="${2:?--from-phase needs 2 or 3}"; shift 2; fi
+MS="${1:?usage: run-fanout.sh [--from-phase 2|3] <milestone> [arch-budget] [wp-budget] [integrator-budget]}"
 B_ARCH="${2:-10}"; B_WP="${3:-10}"; B_INT="${4:-25}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 P="$ROOT/harness/prompts"
@@ -28,7 +35,12 @@ if [ -n "$(find "$ROOT/harness/_staged/m$MS" -type f ! -name '.*' 2>/dev/null)" 
   echo "milestone $MS acceptance tests are still staged; promote them first" >&2; exit 2
 fi
 [ -z "$(git -C "$ROOT" status --porcelain)" ] || { echo "main checkout is dirty; commit first" >&2; exit 2; }
-[ ! -e "$WT" ] || { echo "$WT already exists" >&2; exit 2; }
+if [ "$FROM" = 1 ]; then
+  [ ! -e "$WT" ] || { echo "$WT already exists (use --from-phase 2 to reuse it)" >&2; exit 2; }
+else
+  [ -d "$WT" ] || { echo "--from-phase $FROM needs the existing worktree $WT" >&2; exit 2; }
+  [ -z "$(git -C "$WT" status --porcelain)" ] || { echo "$WT has uncommitted changes" >&2; exit 2; }
+fi
 mkdir -p "$RUN"
 
 # render TEMPLATE OUT KEY=VALUE... ; a value of @file inserts that file's contents.
@@ -66,13 +78,17 @@ agent() {
   fi
 }
 
-echo "== phase 1: architect"
-date -u +%Y-%m-%dT%H:%M:%SZ > "$RUN/started_at"
-git -C "$ROOT" worktree add -q "$WT" -b "$BASE" main
-(cd "$WT/e2e" && npm ci --no-audit --no-fund >/dev/null)
-mkdir -p "$RUN/architect"
-render "$P/fanout-architect.md" "$RUN/architect/prompt.md" MS="$MS" BRANCH="$BASE" SCOPE="@$SCOPE"
-agent architect "$WT" architect "$B_ARCH" || { echo "architect failed; stopping" >&2; exit 1; }
+if [ "$FROM" = 1 ]; then
+  echo "== phase 1: architect"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$RUN/started_at"
+  git -C "$ROOT" worktree add -q "$WT" -b "$BASE" main
+  (cd "$WT/e2e" && npm ci --no-audit --no-fund >/dev/null)
+  mkdir -p "$RUN/architect"
+  render "$P/fanout-architect.md" "$RUN/architect/prompt.md" MS="$MS" BRANCH="$BASE" SCOPE="@$SCOPE"
+  agent architect "$WT" architect "$B_ARCH" || { echo "architect failed; stopping" >&2; exit 1; }
+else
+  echo "== phase 1: reusing the architect's work on $BASE ($(git -C "$WT" log --oneline -1))"
+fi
 
 PLAN="$WT/spec/plans/m$MS.json"
 [ -f "$PLAN" ] || { echo "architect produced no $PLAN" >&2; exit 1; }
@@ -93,11 +109,18 @@ for p in plan["integration"]["packages"]:
 print("plan ok:", ", ".join(w["id"] for w in wps))
 EOF
 ARCH_HEAD="$(git -C "$WT" rev-parse HEAD)"
-
-echo "== phase 2: implementers (parallel)"
 WPS=$(jq -r '.workPackages[].id' "$PLAN")
+
+if [ "$FROM" -le 2 ]; then
+echo "== phase 2: implementers (parallel)"
 pids=()
 for id in $WPS; do
+  if [ -e "$WT-$id" ] || git -C "$ROOT" rev-parse -q --verify "refs/heads/$BASE-$id" >/dev/null; then
+    echo "discarding earlier attempt of $id"
+    git -C "$ROOT" worktree remove --force "$WT-$id" 2>/dev/null || true
+    git -C "$ROOT" branch -D "$BASE-$id" >/dev/null 2>&1 || true
+    rm -rf "$RUN/wp-$id"
+  fi
   br="$BASE-$id"; wdir="$WT-$id"
   git -C "$ROOT" worktree add -q "$wdir" -b "$br" "$ARCH_HEAD"
   mkdir -p "$RUN/wp-$id"
@@ -110,9 +133,13 @@ for id in $WPS; do
   pids+=($!)
 done
 for pid in "${pids[@]}"; do wait "$pid" || true; done
+fi
+for id in $WPS; do
+  [ ! -f "$RUN/wp-$id/failed" ] || { echo "work package $id ended with an API error; stopping before integration" >&2; exit 1; }
+done
 
 echo "== phase 3: integrator"
-mkdir -p "$RUN/integrator"
+rm -rf "$RUN/integrator"; mkdir -p "$RUN/integrator"
 branches=$(for id in $WPS; do printf '`%s-%s` ' "$BASE" "$id"; done)
 render "$P/fanout-integrator.md" "$RUN/integrator/prompt.md" MS="$MS" BRANCH="$BASE" SCOPE="@$SCOPE" \
   N_WP="$(echo "$WPS" | wc -w | tr -d ' ')" WP_BRANCHES="$branches"
