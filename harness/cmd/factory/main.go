@@ -419,6 +419,9 @@ func runPromote(args []string) int {
 		if err != nil || d.IsDir() {
 			return err
 		}
+		if strings.HasPrefix(d.Name(), ".") || strings.HasSuffix(d.Name(), "~") {
+			return nil // editor swap/backup files stay behind
+		}
 		rel, _ := filepath.Rel(stage, p)
 		dst := filepath.Join(r, rel)
 		data, err := os.ReadFile(p)
@@ -442,7 +445,6 @@ func runPromote(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	_ = os.RemoveAll(stage)
 	fmt.Printf("%d file(s) promoted for milestone %d; commit them before the milestone starts\n", moved, *ms)
 	return 0
 }

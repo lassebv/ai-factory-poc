@@ -19,7 +19,7 @@ WT="$(dirname "$ROOT")/$(basename "$ROOT")-m${MS}a"
 RUN="$ROOT/runs/approach-a-m$MS"
 
 [ -f "$SCOPE" ] || { echo "missing $SCOPE"; exit 2; }
-if [ -d "$ROOT/harness/_staged/m$MS" ]; then
+if [ -n "$(find "$ROOT/harness/_staged/m$MS" -type f ! -name '.*' 2>/dev/null)" ]; then
   echo "milestone $MS acceptance tests are still staged; as verifier/human run:" >&2
   echo "  harness/factory promote --ms $MS && git commit -am 'Promote M$MS acceptance tests'" >&2
   exit 2
