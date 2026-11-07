@@ -10,6 +10,10 @@
 # Worktrees: ../<repo>-m<N>c and ../<repo>-m<N>c-<wp>. Transcripts and timing per
 # agent in runs/approach-c-m<N>/<agent>/ of the main checkout.
 set -euo pipefail
+# Keep macOS from idle/system sleeping during a run: a sleeping machine kills
+# in-flight responses ("Your computer went to sleep mid-response"). Lid-close
+# sleep can't be prevented this way; keep the lid open (or use clamshell on power).
+AWAKE=(); command -v caffeinate >/dev/null && AWAKE=(caffeinate -ims)
 MS="${1:?usage: run-fanout.sh <milestone> [arch-budget] [wp-budget] [integrator-budget]}"
 B_ARCH="${2:-10}"; B_WP="${3:-10}"; B_INT="${4:-25}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -47,7 +51,7 @@ agent() {
   local name="$1" dir="$2" role="$3" budget="$4" out="$RUN/$1"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$out/started_at"
   set +e
-  (cd "$dir" && FACTORY_ROLE="$role" claude -p "$(cat "$out/prompt.md")" \
+  (cd "$dir" && FACTORY_ROLE="$role" "${AWAKE[@]}" claude -p "$(cat "$out/prompt.md")" \
     --permission-mode auto --output-format stream-json --verbose \
     --max-budget-usd "$budget" -n "approach-c-m$MS-$name" \
     > "$out/transcript.jsonl" 2> "$out/stderr.log")
@@ -55,6 +59,11 @@ agent() {
   set -e
   date -u +%Y-%m-%dT%H:%M:%SZ > "$out/finished_at"
   tail -1 "$out/transcript.jsonl" | jq -r --arg n "$name" '"[\($n)] \(.subtype) turns=\(.num_turns) cost=$\(.total_cost_usd) \((.duration_ms/60000)|floor)min"' 2>/dev/null || echo "[$name] no result"
+  if tail -1 "$out/transcript.jsonl" | jq -e '.result // "" | startswith("API Error")' >/dev/null 2>&1; then
+    echo "[$name] ended with an API error: $(tail -1 "$out/transcript.jsonl" | jq -r .result | head -1)" >&2
+    echo "api-error" > "$out/failed"
+    return 1
+  fi
 }
 
 echo "== phase 1: architect"
@@ -63,7 +72,7 @@ git -C "$ROOT" worktree add -q "$WT" -b "$BASE" main
 (cd "$WT/e2e" && npm ci --no-audit --no-fund >/dev/null)
 mkdir -p "$RUN/architect"
 render "$P/fanout-architect.md" "$RUN/architect/prompt.md" MS="$MS" BRANCH="$BASE" SCOPE="@$SCOPE"
-agent architect "$WT" architect "$B_ARCH"
+agent architect "$WT" architect "$B_ARCH" || { echo "architect failed; stopping" >&2; exit 1; }
 
 PLAN="$WT/spec/plans/m$MS.json"
 [ -f "$PLAN" ] || { echo "architect produced no $PLAN" >&2; exit 1; }
@@ -107,7 +116,7 @@ mkdir -p "$RUN/integrator"
 branches=$(for id in $WPS; do printf '`%s-%s` ' "$BASE" "$id"; done)
 render "$P/fanout-integrator.md" "$RUN/integrator/prompt.md" MS="$MS" BRANCH="$BASE" SCOPE="@$SCOPE" \
   N_WP="$(echo "$WPS" | wc -w | tr -d ' ')" WP_BRANCHES="$branches"
-agent integrator "$WT" implementer "$B_INT"
+agent integrator "$WT" implementer "$B_INT" || echo "integrator ended with an API error" >&2
 date -u +%Y-%m-%dT%H:%M:%SZ > "$RUN/finished_at"
 
 python3 - "$RUN" <<'EOF'

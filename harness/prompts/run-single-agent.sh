@@ -9,6 +9,10 @@
 # runs/approach-a-m<N>/{prompt.md,transcript.jsonl,stderr.log,started_at,finished_at,exit_code}
 # in the main checkout. Runs in the foreground; background it if you like.
 set -euo pipefail
+# Keep macOS from idle/system sleeping during a run: a sleeping machine kills
+# in-flight responses ("Your computer went to sleep mid-response"). Lid-close
+# sleep can't be prevented this way; keep the lid open (or use clamshell on power).
+AWAKE=(); command -v caffeinate >/dev/null && AWAKE=(caffeinate -ims)
 MS="${1:?usage: run-single-agent.sh <milestone> [budget-usd]}"
 BUDGET="${2:-25}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -40,7 +44,7 @@ EOF
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$RUN/started_at"
 set +e
-(cd "$WT" && FACTORY_ROLE=implementer claude -p "$(cat "$RUN/prompt.md")" \
+(cd "$WT" && FACTORY_ROLE=implementer "${AWAKE[@]}" claude -p "$(cat "$RUN/prompt.md")" \
   --permission-mode auto --output-format stream-json --verbose \
   --max-budget-usd "$BUDGET" -n "approach-a-m$MS" \
   > "$RUN/transcript.jsonl" 2> "$RUN/stderr.log")
