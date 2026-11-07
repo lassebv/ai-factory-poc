@@ -27,6 +27,8 @@ type Options struct {
 	SPA fs.FS
 	// Logger receives request errors and panics. Nil means slog.Default().
 	Logger *slog.Logger
+	// Torrents backs the /api/v1/torrents routes (see contract.go).
+	Torrents TorrentService
 }
 
 // Server is the torrentd HTTP server.
@@ -75,8 +77,7 @@ func New(opts Options) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("/healthz", methodNotAllowed("GET, HEAD"))
-	mux.HandleFunc("POST /api/v1/torrents/preview", s.previewTorrent)
-	mux.HandleFunc("/api/v1/torrents/preview", methodNotAllowed("POST"))
+	s.routeTorrents(mux)
 	mux.HandleFunc("/api/", notFound)
 	mux.HandleFunc("/", s.static)
 

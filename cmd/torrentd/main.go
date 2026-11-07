@@ -1,8 +1,9 @@
 // Command torrentd is a single-binary BitTorrent client with a web UI.
 //
-// Milestone 1 wires up the skeleton: configuration (§10), the data directory,
+// Milestone 1 wired up the skeleton: configuration (§10), the data directory,
 // SQLite with migrations, and the HTTP server with the embedded SPA. It
-// shuts down gracefully on SIGINT or SIGTERM (§6.2).
+// shuts down gracefully on SIGINT or SIGTERM (§6.2). Milestone 3 adds the
+// download engine (internal/bt/session) behind the torrent API.
 package main
 
 import (
@@ -28,6 +29,10 @@ import (
 
 // httpShutdownTimeout bounds the graceful HTTP shutdown (§6.2 step 1).
 const httpShutdownTimeout = 5 * time.Second
+
+// engineCloseTimeout bounds Session.Close; the stopped announces inside it
+// have their own 3 s budget (session.ShutdownAnnounceTimeout).
+const engineCloseTimeout = 5 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -81,14 +86,25 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	log.Info("database ready", "path", dbPath, "previous_shutdown_clean", previousClean)
 
-	// §6.1 steps 3 and 4 (session, torrents) arrive with the engine.
-	if cfg.PeerPort != config.PeerPortUnset {
-		log.Debug("peer port configured; the engine is not implemented yet", "peer_port", cfg.PeerPort)
+	// §6.1 steps 3 and 4: the engine. Torrents are not persisted until M4.
+	sess, err := startEngine(ctx, cfg, st, log)
+	if err != nil {
+		return err
+	}
+	// closeEngine runs Session.Close: the stopped announces (bounded by
+	// session.ShutdownAnnounceTimeout), peers and files (§6.2 step 2).
+	closeEngine := func() {
+		cctx, cancel := context.WithTimeout(context.Background(), engineCloseTimeout)
+		defer cancel()
+		if err := sess.Close(cctx); err != nil {
+			log.Warn("engine shutdown", "err", err)
+		}
 	}
 
 	// §6.1 step 5: HTTP server.
 	l, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
+		closeEngine()
 		return fmt.Errorf("listen on %s: %w", cfg.Addr, err)
 	}
 	if !isLoopback(cfg.Addr) {
@@ -100,6 +116,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Dev:          cfg.Dev,
 		SPA:          torrentd.WebFS(),
 		Logger:       log,
+		Torrents:     sess,
 	})
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(l) }()
@@ -115,19 +132,28 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	case <-ctx.Done():
 		log.Info("shutting down")
 	case err := <-serveErr:
+		closeEngine()
 		return fmt.Errorf("HTTP server: %w", err)
 	}
 
-	// §6.2 step 1: graceful HTTP shutdown.
+	// §6.2 steps 1 and 2 run at the same time (ADR-0015 §3): the graceful
+	// HTTP shutdown and the engine shutdown with its stopped announces, so
+	// the announce budget is measured from the signal (TRK-01).
+	engineDone := make(chan struct{})
+	go func() {
+		defer close(engineDone)
+		closeEngine()
+	}()
 	shCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shCtx); err != nil {
 		log.Warn("HTTP shutdown did not finish in time", "err", err)
 	}
 	<-serveErr
+	<-engineDone
 
-	// §6.2 steps 2-4 (announces, flushes, peers) arrive with the engine. The
-	// clean-shutdown marker is the last write before closing the DB (C3).
+	// §6.2 steps 3-4: nothing to flush before M4. The clean-shutdown marker
+	// is the last write before closing the DB (C3).
 	if err := st.MarkCleanShutdown(context.Background()); err != nil {
 		log.Error("write clean-shutdown marker", "err", err)
 	}
