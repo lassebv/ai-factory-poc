@@ -248,13 +248,20 @@ func CoverageFloor(relDir string) float64 {
 	}
 }
 
+// hasTests reports whether a package directory contains any _test.go file.
+func hasTests(root, relDir string) bool {
+	m, _ := filepath.Glob(filepath.Join(root, filepath.FromSlash(relDir), "*_test.go"))
+	return len(m) > 0
+}
+
 var coverRE = regexp.MustCompile(`coverage:\s+([0-9.]+)% of statements`)
 
 // Coverage runs `go test -cover ./...` in root and checks every package
 // against its floor. Packages without tests count as 0%. A floor is enforced
 // from the milestone that introduces the package (intro, from the acceptance
-// matrix): when upto > 0, packages introduced after milestone upto are
-// reported but not enforced.
+// matrix): when upto > 0, a package with no tests that is introduced after
+// milestone upto (a placeholder) is reported but not enforced. A package that
+// has tests is always enforced, whatever milestone first checks it.
 func Coverage(ctx context.Context, root string, upto int, intro map[string]int) ([]Finding, string, error) {
 	cmdMod := exec.CommandContext(ctx, "go", "list", "-m")
 	cmdMod.Dir = root
@@ -306,7 +313,9 @@ func Coverage(ctx context.Context, root string, upto int, intro map[string]int) 
 			}
 			pct, _ = strconv.ParseFloat(m[1], 64)
 		}
-		if ms := intro[relDir]; upto > 0 && ms > upto {
+		// Only placeholders are exempt: a package with no tests whose milestone
+		// has not started. Anything with tests is always held to its floor.
+		if ms := intro[relDir]; upto > 0 && ms > upto && !hasTests(root, relDir) {
 			fmt.Fprintf(&report, "%-40s %6.1f%%  not enforced before M%d  %s\n", relDir, pct, ms, status)
 			continue
 		}

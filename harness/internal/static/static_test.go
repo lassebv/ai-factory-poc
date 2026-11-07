@@ -96,3 +96,13 @@ func TestCoverageFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestHasTests(t *testing.T) {
+	root := t.TempDir()
+	put(t, root, "a/a.go", "package a\n")
+	put(t, root, "b/b.go", "package b\n")
+	put(t, root, "b/b_test.go", "package b\n")
+	if hasTests(root, "a") || !hasTests(root, "b") {
+		t.Fatal("hasTests is wrong")
+	}
+}
