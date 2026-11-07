@@ -339,3 +339,6 @@ func (i *Instance) Do(t testing.TB, method, path string, body []byte, headers ma
 	}
 	return Response{Status: resp.StatusCode, Header: resp.Header, Body: data}
 }
+
+// PID returns the process id.
+func (i *Instance) PID() int { return i.cmd.Process.Pid }

@@ -14,5 +14,6 @@ ADRs record decisions that involve a real trade-off and were made by the human o
 | [0008](0008-nfr-scenarios.md) | NFRs are defined as concrete benchmark scenarios | A13 | Accepted |
 | [0009](0009-quality-gates.md) | Code-quality gates | A14 | Accepted |
 | [0010](0010-schema-evolution.md) | Schema evolution before and after v1 | T7 | Accepted |
+| [0011](0011-m3-download-api-and-frozen-contracts.md) | M3 pulls a minimal add/get API forward; `contract.go` files are frozen | §15.3 | Accepted |
 
 **New ADRs:** number them sequentially, use the same template (Context / Decision / Consequences), and add a row here. The architect role writes them, and the human approves them if they change scope, risk or the API contract.

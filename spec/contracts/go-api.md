@@ -92,4 +92,17 @@ type Magnet struct {
 func ParseMagnet(uri string) (*Magnet, error)
 ```
 
+## Milestone 3 additions (ADR-0011)
+
+| Contract | Detail |
+| --- | --- |
+| Add / get | `POST /api/v1/torrents` (`file`, `downloadDir`, `startPaused`), `GET /api/v1/torrents` and `GET /api/v1/torrents/{id}`, as in `spec/openapi.yaml`. At M3, `GET …/{id}` must satisfy the `Torrent` schema. |
+| Download dir | Must be absolute. It is created (with parents) if missing. Files go to `<downloadDir>/<files[].path>`. |
+| Lifecycle | add → `checking` (fast: nothing on disk yet) → `downloading` → `seeding` when every wanted piece is verified. `completedBytes` and `progress` grow as pieces verify. `wastedTotal` counts discarded bytes. |
+| Peer port | `--peer-port N` binds TCP on all interfaces; 0 means any free port. The announced `port` is the bound port. |
+| Tracker | HTTP(S) announce to the torrent's trackers (tier order, BEP 12). Each announce fails and is retried independently; there's no UDP yet. |
+| Peers | Outgoing TCP connections to tracker peers. Plaintext BitTorrent only (no MSE, no uTP). |
+
+Package contracts: in Approach C, each package's frozen interface lives in its `contract.go`, which only the architect may edit (ADR-0011).
+
 Torrent-file parsing is **not** pinned. It is tested black-box through `POST /api/v1/torrents/preview` (see `spec/openapi.yaml`).

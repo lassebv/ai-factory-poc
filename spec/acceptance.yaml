@@ -380,105 +380,127 @@
 
 # ───────────────────────── M3 Single-peer download ─────────────────────────
 
+- id: ADD-01
+  src: "§8.1, §8.2, ADR-0011"
+  ms: 3
+  tier: L3
+  text: "POST /api/v1/torrents (multipart file + downloadDir) returns 201 with a Torrent; GET /api/v1/torrents/{id} and GET /api/v1/torrents return it; a duplicate returns 409 already_exists with the id; a relative downloadDir returns 400 invalid_download_dir; the download dir is created if missing."
+  check: {go: ./acceptance/download, module: harness, run: TestAddTorrent}
+
 - id: TRK-01
+  src: "§4.1 HTTP trackers, §6.2"
+  ms: 3
+  tier: L3
+  text: "torrentd announces event=started on add, event=completed (left=0) when the download finishes, and event=stopped on SIGTERM within the 3 s shutdown budget."
+  check: {go: ./acceptance/download, module: harness, run: TestAnnounceLifecycle}
+
+- id: TRK-02
+  src: "§4.1, D7, D13"
+  ms: 3
+  tier: L3
+  text: "Announces carry the info_hash, a 20-byte peer_id starting with -TD0100-, the listen port, uploaded/downloaded/left, compact=1, numwant=50 and a key that stays the same for the session."
+  check: {go: ./acceptance/download, module: harness, run: TestAnnounceParams}
+
+- id: TRK-03
   src: "§4.1 HTTP trackers"
   ms: 3
   tier: L3
-  text: "HTTP announce: started/completed/stopped events, compact and non-compact peers, interval and min interval, tracker id, failure reason and warning message."
-  check: {go: ./internal/bt/tracker, run: TestHTTPAnnounce}
-
-- id: TRK-02
-  src: "D7"
-  ms: 3
-  tier: L1
-  text: "Announce parameters are compact=1 and numwant=50, with a `key` that stays stable for the session."
-  check: {go: ./internal/bt/tracker, run: TestAnnounceParams}
+  text: "A tracker that returns a non-compact (dict) peer list works as well as a compact one: the download completes."
+  check: {go: ./acceptance/download, module: harness, run: TestNonCompactPeers}
 
 - id: WIRE-01
   src: "§4.1 Peer wire, D13"
   ms: 3
-  tier: L1
-  text: "The handshake works over net.Pipe; the peer ID matches `-TD0100-` followed by 12 bytes."
-  check: {go: ./internal/bt/peer, run: TestHandshake}
+  tier: L3
+  text: "torrentd sends a correct BitTorrent handshake (pstr, 8 reserved bytes, info_hash, peer_id) and completes a download from a scriptable peer."
+  check: {go: ./acceptance/download, module: harness, run: TestHandshake}
 
 - id: WIRE-02
   src: "§11 robustness"
   ms: 3
-  tier: L1
-  text: "Messages over 16 KiB+13 bytes (other than bitfield and metadata) cause a disconnect."
-  check: {go: ./internal/bt/peer, run: TestOversizeMessage}
-
-- id: WIRE-03
-  src: "T6"
-  ms: 3
-  tier: L1
-  text: "A request for more than 16 KiB gets reject_request (fast extension) or a disconnect."
-  check: {go: ./internal/bt/peer, run: TestOversizeRequest}
+  tier: L3
+  text: "A peer that sends a message longer than 16 KiB + 13 bytes (other than bitfield) is disconnected, and torrentd keeps running."
+  check: {go: ./acceptance/download, module: harness, run: TestOversizeMessageDisconnects}
 
 - id: WIRE-04
-  src: "§11, §13"
+  src: "§11 robustness"
   ms: 3
-  tier: L2
-  text: "Fuzz: the wire message decoder never panics."
-  check: {fuzz: ./internal/bt/peer, target: FuzzDecodeMessage, time: 30s}
+  tier: L3
+  text: "200 peers that send random garbage after the handshake do not crash torrentd: it stays healthy and still completes the download from a good peer."
+  check: {go: ./acceptance/download, module: harness, run: TestGarbageDoesNotCrash}
+
+- id: WIRE-05
+  src: "§4.1 Peer wire"
+  ms: 3
+  tier: L3
+  text: "Blocks are requested in 16 KiB units (only the last block of the last piece may be shorter), never past a piece end, and requests are pipelined (at least 5 outstanding at some point, never more than 250)."
+  check: {go: ./acceptance/download, module: harness, run: TestBlockRequests}
 
 - id: STOR-01
   src: "§4.1 Storage, §13"
   ms: 3
-  tier: L1
-  text: "Pieces that span file boundaries are read and written correctly."
-  check: {go: ./internal/bt/storage, run: TestSpanningPieces}
+  tier: L3
+  text: "A multi-file torrent whose pieces span file boundaries (including a zero-length file and a file smaller than a piece) downloads byte-for-byte correctly."
+  check: {go: ./acceptance/download, module: harness, run: TestSpanningPieces}
 
 - id: STOR-02
-  src: "G21"
+  src: "§4.1, G21"
   ms: 3
-  tier: L1
-  text: "Files are named `<file>.part` until all their pieces are verified, then renamed; toggling use_part_files affects only incomplete files."
-  check: {go: ./internal/bt/storage, run: TestPartFiles}
-
-- id: STOR-03
-  src: "§4.3, G21"
-  ms: 3
-  tier: L1
-  text: "The skipped part of a boundary piece goes to `.torrentd-<infohash>.parts`; changing skip→wanted copies the bytes into the file."
-  check: {go: ./internal/bt/storage, run: TestSkipBoundaryParts}
+  tier: L3
+  text: "Files are preallocated (sparsely) as <file>.part when the download starts (§4.1 Storage). Each file is renamed to its final name as soon as all its pieces verify, so during a download finished files have final names and unfinished ones are still .part; after completion, no .part files remain."
+  check: {go: ./acceptance/download, module: harness, run: TestPartFiles}
 
 - id: STOR-04
-  src: "C2"
+  src: "C2, ADR-0001"
   ms: 3
-  tier: L1
-  text: "Pad files are never created on disk, and they hash as zeros."
-  check: {go: ./internal/bt/storage, run: TestPadFiles}
+  tier: L3
+  text: "Downloading a hybrid torrent with BEP 47 pad files writes the real files byte-for-byte and never creates pad files on disk."
+  check: {go: ./acceptance/download, module: harness, run: TestPadFilesNotCreated}
 
 - id: STOR-05
   src: "§4.1 Hash verification"
   ms: 3
-  tier: L1
-  text: "A piece that fails its hash check is discarded and its bytes are added to wasted."
-  check: {go: ./internal/bt/storage, run: TestHashFailure}
+  tier: L3
+  text: "A piece that arrives corrupted is discarded and downloaded again; the final data is correct and wastedTotal includes at least that piece."
+  check: {go: ./acceptance/download, module: harness, run: TestHashFailureRecovers}
 
 - id: STOR-06
-  src: "§4.1, D9"
+  src: "§4.1 Storage, D9"
   ms: 3
-  tier: L1
-  text: "The open-file-handle LRU never exceeds its cap (default 128)."
-  check: {go: ./internal/bt/storage, run: TestFDCache}
+  tier: L3
+  text: "Downloading a torrent with 300 files never holds more than 128 open file handles under the download dir."
+  check: {go: ./acceptance/download, module: harness, run: TestOpenFileLimit}
 
 - id: STOR-07
   src: "§11 security"
   ms: 3
-  tier: L1
-  text: "Storage can never create or write a path outside download_dir, even with crafted metainfo."
-  check: {go: ./internal/bt/storage, run: TestNoEscape}
+  tier: L3
+  text: "After a download, torrentd has created no files outside the download dir and its data dir."
+  check: {go: ./acceptance/download, module: harness, run: TestWritesStayInDownloadDir}
 
 - id: SP-01
-  src: "§15.3"
+  src: "§15.3, §11 interop"
   ms: 3
   tier: L4
-  text: "One leecher downloads a multi-file torrent from one seeder through an HTTP tracker, and every file's hash is correct."
-  check: {go: ./tools/swarm, run: TestSinglePeerDownload}
+  text: "torrentd downloads a multi-file torrent from a real libtorrent seeder (Docker) through an HTTP tracker; the data is byte-identical, and the torrent ends in state seeding with progress 1."
+  timeout: 15m
+  check: {go: ./acceptance/download, module: harness, run: TestDownloadFromLibtorrent}
 
 # ───────────────────────── M4 Swarm engine ─────────────────────────
+
+- id: WIRE-03
+  src: "T6"
+  ms: 4
+  tier: L3
+  text: "A request for more than 16 KiB gets reject_request (fast extension) or a disconnect."
+  check: {go: ./internal/bt/peer, run: TestOversizeRequest}
+
+- id: WIRE-06
+  src: "§11, §13"
+  ms: 4
+  tier: L2
+  text: "Fuzz: the wire message decoder never panics."
+  check: {fuzz: ./internal/bt/peer, target: FuzzDecodeMessage, time: 30s}
 
 - id: PICK-01
   src: "§4.1 Piece selection"
@@ -728,6 +750,13 @@
   check: {go: ./internal/bt/peer, run: TestExtendedHandshake}
 
 # ───────────────────────── M6 Live stats + API ─────────────────────────
+
+- id: STOR-03
+  src: "§4.3, G21"
+  ms: 6
+  tier: L3
+  text: "The skipped part of a boundary piece goes to `.torrentd-<infohash>.parts`; changing skip→wanted copies the bytes into the file."
+  check: {go: ./internal/bt/storage, run: TestSkipBoundaryParts}
 
 - id: API-01
   src: "§13 API, G12"

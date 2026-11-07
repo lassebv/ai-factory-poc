@@ -23,6 +23,10 @@ harness/
     skeleton/          M1: healthz, migrations, WAL, SPA fallback, config, Host/Origin, dev mode
     depcheck/          M1: tools/depcheck against module-graph fixtures
     preview/           M2: metainfo validation via POST /api/v1/torrents/preview
+    download/          M3: downloads against fakes and a real libtorrent seeder (Docker)
+    internal/benc/     harness-own bencode (test infra never uses torrentd code)
+    internal/torrentgen/ deterministic torrents + content; flat byte view incl. pad files
+    internal/fakes/    fake HTTP tracker and scriptable fake peer (corrupt/stall/garbage/oversize)
   fixtures/
     torrents/          real, libtorrent-corpus and synthetic .torrent files, plus expected.json
     depcheck/          go.mod + `go mod graph` fixtures
@@ -73,6 +77,16 @@ A throwaway reference implementation of milestones 1–2 was written **outside t
   - depcheck now handles real `go mod graph` output (go/toolchain pseudo-modules, `// indirect` requirements, transitive dependencies of `golang.org/x`).
   - The warning text accepts either `[::]` or `0.0.0.0`.
   - The meaning of "nesting depth" is spelled out.
+
+### Milestone 3 harness (2026-11-07)
+
+The same method as before: a throwaway reference leecher (about 500 lines, kept outside the repo, built on the merged M1 and M2 code).
+- **Pass rate:** it passed all 15 M3 checks, including SP-01 against a real libtorrent 2.0 seeder in Docker.
+- **Mutation testing:** 10 out of 10 deliberate bugs were caught: no completed or stopped announce, wrong peer-id prefix, wrong numwant, no hash check, pad files written, no oversize disconnect, `.part` files never renamed, 32 KiB blocks, relative download dir accepted.
+- **What it fixed in the harness before any factory run:**
+  - The oversize probe was a malformed `piece`, so a client with no size limit still disconnected for a different reason. It now sends an unknown message id, so only a size check causes the disconnect.
+  - STOR-02 now says explicitly that files are preallocated as `.part` when the download starts.
+- **Oracle check:** `torrentgen`'s info-hashes agree with libtorrent and Transmission, and the libtorrent-created hybrid fixture verifies piece by piece with pad files served as zeros.
 
 ## Adding checks (verifier role)
 

@@ -22,7 +22,7 @@ Your role is your subagent type (`.claude/agents/<role>.md`), or `FACTORY_ROLE` 
 | factory machinery | `CLAUDE.md`, `.claude/`, `harness/{cmd,internal,hooks,prompts}/`, `harness/go.*`, `harness/factory`, `harness/README.md`, `retros/` | human |
 | acceptance | `spec/acceptance.yaml`, the rest of `harness/` (including `harness/_staged/`), `e2e/`, `*_acceptance_test.go`, `*.acceptance.test.ts(x)` | human, verifier |
 | red team | `harness/redteam/` | human, verifier, red-team |
-| contracts | everything else in `spec/` (decisions, OpenAPI, Go API) | human, architect |
+| contracts | everything else in `spec/` (decisions, OpenAPI, Go API), and every `contract.go` / `contract_test.go` (frozen package interfaces, ADR-0011) | human, architect |
 | product | everything else | human, architect, implementer |
 | shared | `escalations/`, `reviews/`, `runs/` | everyone |
 

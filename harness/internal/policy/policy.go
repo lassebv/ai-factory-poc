@@ -101,6 +101,7 @@ var Areas = []Area{
 		Name:     "contracts",
 		Owners:   []Role{Human, Architect},
 		Prefixes: []string{"spec/"},
+		Suffixes: []string{"contract.go", "contract_test.go"}, // frozen package contracts (ADR-0011)
 	},
 	{
 		Name:   "product",
