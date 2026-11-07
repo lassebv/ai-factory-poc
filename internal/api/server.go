@@ -27,6 +27,8 @@ type Options struct {
 	SPA fs.FS
 	// Logger receives request errors and panics. Nil means slog.Default().
 	Logger *slog.Logger
+	// Torrents backs the /api/v1/torrents routes (see contract.go).
+	Torrents TorrentService
 }
 
 // Server is the torrentd HTTP server.
