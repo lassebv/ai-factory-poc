@@ -250,6 +250,7 @@ func runIntegrity(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("integrity", flag.ExitOnError)
 	root := fs.String("root", "", "repo root")
 	base := fs.String("base", "main", "base ref to compare against")
+	head := fs.String("head", "", "check only the committed range base...head (default: HEAD plus the working tree)")
 	roleFlag := fs.String("role", os.Getenv("FACTORY_ROLE"), "role that produced the branch")
 	_ = fs.Parse(args)
 	if *roleFlag == "" {
@@ -262,7 +263,7 @@ func runIntegrity(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	files, err := integrity.ChangedFiles(ctx, r, *base)
+	files, err := integrity.ChangedFilesRange(ctx, r, *base, *head)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2

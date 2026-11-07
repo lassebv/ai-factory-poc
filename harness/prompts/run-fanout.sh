@@ -142,9 +142,14 @@ echo "== phase 3: integrator"
 rm -rf "$RUN/integrator"; mkdir -p "$RUN/integrator"
 branches=$(for id in $WPS; do printf '`%s-%s` ' "$BASE" "$id"; done)
 render "$P/fanout-integrator.md" "$RUN/integrator/prompt.md" MS="$MS" BRANCH="$BASE" SCOPE="@$SCOPE" \
-  N_WP="$(echo "$WPS" | wc -w | tr -d ' ')" WP_BRANCHES="$branches"
+  N_WP="$(echo "$WPS" | wc -w | tr -d ' ')" WP_BRANCHES="$branches" ARCH_HEAD="$ARCH_HEAD"
 agent integrator "$WT" implementer "$B_INT" || echo "integrator ended with an API error" >&2
 date -u +%Y-%m-%dT%H:%M:%SZ > "$RUN/finished_at"
+
+echo "== integrity per role"
+{ "$ROOT/harness/factory" integrity --root "$WT" --base main --head "$ARCH_HEAD" --role architect
+  "$ROOT/harness/factory" integrity --root "$WT" --base "$ARCH_HEAD" --role implementer
+} 2>&1 | tee "$RUN/integrity.txt" || true
 
 python3 - "$RUN" <<'EOF'
 import json, os, sys, glob

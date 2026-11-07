@@ -35,7 +35,7 @@ You are the **integrator** in a software-factory experiment: Approach C, contrac
 ## Definition of done
 
 1. `harness/factory gate --upto {{MS}}` exits 0.
-2. `harness/factory integrity --base main --role implementer` passes.
+2. `harness/factory integrity --base {{ARCH_HEAD}} --role implementer` passes. That covers everything after the architect's commits; the launcher checks the architect's own range separately.
 3. `make build` works, and `go vet ./...` is clean.
 4. Everything is committed.
 

@@ -426,7 +426,7 @@
   src: "§11 robustness"
   ms: 3
   tier: L3
-  text: "200 peers that send random garbage after the handshake do not crash torrentd: it stays healthy and still completes the download from a good peer."
+  text: "40 peers that send random garbage after the handshake (at least 20 of them connected to) do not crash torrentd: it stays healthy and still completes the download from a good peer."
   check: {go: ./acceptance/download, module: harness, run: TestGarbageDoesNotCrash}
 
 - id: WIRE-05

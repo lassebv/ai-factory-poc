@@ -1,0 +1,38 @@
+{
+  "architect": {
+    "subtype": "success",
+    "num_turns": 66,
+    "total_cost_usd": 5.581377000000001,
+    "duration_ms": 1195452
+  },
+  "integrator": {
+    "subtype": "success",
+    "num_turns": 57,
+    "total_cost_usd": 3.2059526000000003,
+    "duration_ms": 627777
+  },
+  "wp-peer": {
+    "subtype": "success",
+    "num_turns": 20,
+    "total_cost_usd": 1.1134477999999999,
+    "duration_ms": 363342
+  },
+  "wp-piece": {
+    "subtype": "success",
+    "num_turns": 15,
+    "total_cost_usd": 0.7624398,
+    "duration_ms": 171696
+  },
+  "wp-storage": {
+    "subtype": "success",
+    "num_turns": 14,
+    "total_cost_usd": 0.8084828000000001,
+    "duration_ms": 181796
+  },
+  "wp-tracker": {
+    "subtype": "success",
+    "num_turns": 16,
+    "total_cost_usd": 0.8858458,
+    "duration_ms": 187267
+  }
+}

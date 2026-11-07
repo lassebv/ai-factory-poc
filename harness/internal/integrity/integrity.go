@@ -47,12 +47,23 @@ func git(ctx context.Context, root string, args ...string) ([]string, error) {
 // committed changes since the merge base, staged and unstaged changes, and
 // untracked files (honoring .gitignore).
 func ChangedFiles(ctx context.Context, root, base string) ([]string, error) {
+	return ChangedFilesRange(ctx, root, base, "")
+}
+
+// ChangedFilesRange is ChangedFiles for the committed range base...head only
+// (no working-tree changes) when head is set. It lets one branch be checked
+// per role, e.g. the architect's commits and then the implementers' commits.
+func ChangedFilesRange(ctx context.Context, root, base, head string) ([]string, error) {
 	set := map[string]bool{}
-	for _, args := range [][]string{
+	cmds := [][]string{
 		{"diff", "--name-only", "--no-renames", base + "...HEAD"},
 		{"diff", "--name-only", "--no-renames", "HEAD"},
 		{"ls-files", "--others", "--exclude-standard"},
-	} {
+	}
+	if head != "" {
+		cmds = [][]string{{"diff", "--name-only", "--no-renames", base + "..." + head}}
+	}
+	for _, args := range cmds {
 		lines, err := git(ctx, root, args...)
 		if err != nil {
 			return nil, err

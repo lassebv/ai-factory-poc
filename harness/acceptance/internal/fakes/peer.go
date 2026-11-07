@@ -245,52 +245,72 @@ func (p *Peer) serve(c net.Conn) {
 	cancelled := map[Request]bool{}
 	var qmu sync.Mutex
 
-	// Writer: answer requests in order.
+	// serveOne answers one request; false means the connection is gone.
+	serveOne := func(r Request) bool {
+		qmu.Lock()
+		if cancelled[r] {
+			delete(cancelled, r)
+			outstanding--
+			qmu.Unlock()
+			return true
+		}
+		qmu.Unlock()
+		if p.opts.Delay > 0 {
+			time.Sleep(p.opts.Delay)
+		}
+		block := make([]byte, r.Length)
+		if _, err := p.t.ReadAt(block, int64(r.Index)*p.t.PieceLength+int64(r.Begin)); err != nil && err != io.EOF {
+			return false
+		}
+		p.mu.Lock()
+		if p.opts.CorruptOnce[int(r.Index)] && !p.corrupted[int(r.Index)] && r.Begin == 0 {
+			p.corrupted[int(r.Index)] = true
+			block[0] ^= 0xff
+		}
+		p.stats.BlocksSent++
+		p.mu.Unlock()
+		payload := make([]byte, 8+len(block))
+		binary.BigEndian.PutUint32(payload, r.Index)
+		binary.BigEndian.PutUint32(payload[4:], r.Begin)
+		copy(payload[8:], block)
+		if err := send(7, payload); err != nil {
+			return false
+		}
+		qmu.Lock()
+		outstanding--
+		qmu.Unlock()
+		return true
+	}
+
+	// Writer: answer requests in order. Requests for stalled pieces are held
+	// back on their own (until Release) without blocking the other pieces, so
+	// the stall does not depend on the client's piece order (M3 escalation).
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for r := range queue {
-			qmu.Lock()
-			if cancelled[r] {
-				delete(cancelled, r)
-				outstanding--
-				qmu.Unlock()
-				continue
-			}
-			qmu.Unlock()
 			if p.opts.StallFrom > 0 && int(r.Index) >= p.opts.StallFrom {
 				p.mu.Lock()
-				for !p.released {
-					p.cond.Wait()
-				}
+				stalled := !p.released
 				p.mu.Unlock()
+				if stalled {
+					go func(r Request) {
+						p.mu.Lock()
+						for !p.released {
+							p.cond.Wait()
+						}
+						p.mu.Unlock()
+						serveOne(r)
+					}(r)
+					continue
+				}
 			}
-			if p.opts.Delay > 0 {
-				time.Sleep(p.opts.Delay)
-			}
-			block := make([]byte, r.Length)
-			if _, err := p.t.ReadAt(block, int64(r.Index)*p.t.PieceLength+int64(r.Begin)); err != nil && err != io.EOF {
+			if !serveOne(r) {
 				return
 			}
-			p.mu.Lock()
-			if p.opts.CorruptOnce[int(r.Index)] && !p.corrupted[int(r.Index)] && r.Begin == 0 {
-				p.corrupted[int(r.Index)] = true
-				block[0] ^= 0xff
-			}
-			p.stats.BlocksSent++
-			p.mu.Unlock()
-			payload := make([]byte, 8+len(block))
-			binary.BigEndian.PutUint32(payload, r.Index)
-			binary.BigEndian.PutUint32(payload[4:], r.Begin)
-			copy(payload[8:], block)
-			if err := send(7, payload); err != nil {
-				return
-			}
-			qmu.Lock()
-			outstanding--
-			qmu.Unlock()
 		}
 	}()
+	// Held requests finish when the test releases or closes the peer.
 	defer func() { close(queue); <-done }()
 
 	for {
