@@ -299,7 +299,9 @@ type recorder struct {
 	got    chan struct{}
 }
 
-func newRecorder() *recorder { return &recorder{errc: make(chan error, 4), got: make(chan struct{}, 1024)} }
+func newRecorder() *recorder {
+	return &recorder{errc: make(chan error, 4), got: make(chan struct{}, 1024)}
+}
 
 func (r *recorder) cfg(c clock.Clock) Config {
 	return Config{

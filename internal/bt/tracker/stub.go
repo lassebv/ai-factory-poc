@@ -11,9 +11,9 @@ import (
 
 const errStub = "tracker: not implemented"
 
-func newHTTPClient(*http.Client) Client                    { panic(errStub) }
+func newHTTPClient(*http.Client) Client                     { panic(errStub) }
 func newAnnouncer([][]string, Client, *rand.Rand) Announcer { panic(errStub) }
-func startLoop(LoopConfig) Loop                            { panic(errStub) }
+func startLoop(LoopConfig) Loop                             { panic(errStub) }
 
 // String returns the event name used in the announce query.
 func (e Event) String() string { panic(errStub) }
