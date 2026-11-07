@@ -52,3 +52,9 @@ the M1 brief explicitly forbids that ("Don't start milestone 2").
 - I did not weaken or skip any check. QUAL-01 is expected to stay red only
   for those two packages (their acceptance tests fail against the stubs).
   Every M1 package is at or above its floor.
+
+Measured on `impl/m1-approach-a` (2026-11-07): `harness/factory gate --ms 1`
+shows 17/18 passing. QUAL-02 passes thanks to the stubs. QUAL-01 fails with
+exactly `internal/bt/bencode: tests fail` and `internal/bt/metainfo: tests
+fail`. Everything else is above its floor: `.` 75%, api 99%, clock 100%,
+config 100%, store 89%, depcheck 96%.
