@@ -2,7 +2,10 @@ module torrentd
 
 go 1.25
 
-require modernc.org/sqlite v1.38.2
+require (
+	golang.org/x/text v0.31.0
+	modernc.org/sqlite v1.38.2
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

@@ -1,58 +1,77 @@
-# PROGRESS — milestone 1 (Skeleton), Approach A
+# PROGRESS — torrentd, Approach A
 
-## Status (2026-11-07)
-`harness/factory gate --ms 1`: **17/18 pass**. The only failure is QUAL-01,
-and it's caused by the M2 packages, not M1 code. See
-`escalations/M1-qual-gates-include-m2-packages.md`.
-`harness/factory integrity --base main --role implementer`: ok.
-`make build` and `go vet ./...` are clean.
+## Status (2026-11-07): milestone 2 (Bencode + metainfo)
+`harness/factory gate --upto 2`: see the final report / latest `runs/gate/`.
+All 21 M2 entries passed on the first gate run after the implementation.
+Coverage: bencode 97.5%, metainfo 100%, api 99.5%.
 
-## Done
-- `go.mod`: module `torrentd`, Go 1.25. The only direct dependency is
-  `modernc.org/sqlite` v1.38.2 (the rest are indirect through it).
-- `internal/config`: flags > env > defaults (§10) and the OS default data
-  dir per the CLI contract. Unknown flags exit 2, `-h` exits 0.
-- `internal/store`: WAL, `busy_timeout(5000)`, `foreign_keys(1)` via DSN
-  pragmas. Embedded `migrations/0001_init.sql` (§7.1 plus §16.6:
-  `global_stats`, `banned_peers.expires_at`), each migration in its own
-  transaction and recorded in `schema_migrations`. Settings get/set/delete,
-  and the clean-shutdown marker (C3): cleared on start, written last on
-  graceful shutdown.
-- `internal/clock`: the `Clock`/`Timer`/`Ticker` interfaces, `Real()`, and a
-  `Fake` for deterministic tests (T1).
-- `internal/api`: Host allowlist (G17) → `--dev` CORS → Origin check on
-  POST/PUT/PATCH/DELETE → mux. Covers the `Error` shape, `/healthz`,
-  `/api/*` 404 `not_found`, the SPA fallback (real files are served as-is,
-  everything else gets index.html) and panic recovery to a 500 `internal`.
-- `cmd/torrentd`: startup §6.1 steps 1, 2 and 5. Logs a WARN on non-loopback
-  binds. `--open` is best-effort. SIGINT/SIGTERM → graceful HTTP shutdown
-  (5 s) → marker → DB close → exit 0.
-- `webembed.go` (package `torrentd`, `WebFS()`) and the placeholder
-  `web/dist/index.html`.
-- `tools/depcheck`, per the contract.
-- `Makefile`: `build` (works without the frontend), `test`, `vet`,
-  `depcheck`, `gate`.
+## Milestone 2: done
+- `internal/bt/bencode`: reflection-based `Marshal` (canonical: map keys and
+  struct fields sorted bytewise), `Unmarshal` (lenient) and
+  `UnmarshalStrict`, `RawMessage`, struct tags, `Valid`. Depth cap 64
+  (checked before recursing, so a million `l`s can't overflow the stack);
+  string lengths are checked against the remaining input before any
+  allocation, digit by digit, so huge lengths can't overflow either.
+- `internal/bt/metainfo`: `Parse` (whole file, lenient) and `ParseInfo`
+  (info dict, strict; reusable for ut_metadata in M5). `ParseMagnet` per the
+  pinned contract.
+- `POST /api/v1/torrents/preview` in `internal/api/preview.go`.
+- Dependency added: `golang.org/x/text` (NFC normalization and case folding
+  for A3 duplicate detection). Allowed by §2.
 
-## Decisions
-- **M2 API stubs.** `internal/bt/bencode` and `internal/bt/metainfo` hold
-  only the pinned signatures, which return `ErrNotImplemented`. Without them
-  the verifier's M2 acceptance tests don't compile, and `go vet ./...` and
-  staticcheck fail. M2 replaces the stubs.
-- **Wrong method on non-API paths.** POST /healthz, DELETE /settings and the
-  like return `405` with code `invalid_request`. ErrorCode has no
-  `method_not_allowed`, and OpenAPI doesn't define 405 responses.
-- **`--dev` GET /** returns a 404 `not_found` JSON (the SPA isn't served).
-  `/healthz` and `/api` still work.
-- **Host header without a port** is treated as port 80, so `localhost` is
-  only allowed when the server listens on port 80.
-- **Origins:** same-origin means `http://` plus an allowed Host entry. With
-  `--dev`, `http://localhost:5173` and `http://127.0.0.1:5173` are added.
-  `null` is rejected.
-- **`--peer-port`:** accepted and validated (0–65535). `-1` internally
-  means "use `listen_port` from settings". Unused until the engine exists.
-- **Default settings (§7.2)** are not seeded yet. That belongs with
-  `/settings` (M6).
+## Milestone 2: decisions and interpretations
+- **Lenient mode** accepts everything strict mode rejects *for canonicity*:
+  unsorted and duplicate keys (last wins), leading zeros in integers and
+  lengths, and `-0`. It still rejects empty integers (`ie`, `i-e`),
+  non-digits, truncation, non-string keys and trailing data. The contract
+  says strict "additionally" rejects those, so this is the literal reading.
+- **Integer overflow** (beyond int64, or beyond the target type) is an error.
+- **bool** encodes as `i0e`/`i1e` and decodes from any integer (non-zero is
+  true). Byte arrays (`[20]byte`) encode as strings and decode only from a
+  string of exactly that length. Nil pointers, nil interfaces and empty
+  `RawMessage`s are always left out of a struct (they have no encoding);
+  at top level or in a list they are an error.
+- **Top-level tracker fields** (`announce`, `announce-list`) are decoded
+  tolerantly: if they are mistyped they are ignored, not fatal. Only the info
+  dict decides whether a torrent is valid.
+- **Trackers:** announce-list tiers in file order; blank URLs and URLs seen
+  in an earlier position are dropped; empty tiers are dropped and the tier
+  numbers stay contiguous. `announce` is used as tier 0 only when the
+  announce-list yields nothing. URLs are not validated (libtorrent's
+  `sample.torrent` has a scheme-less one, which the oracle keeps).
+- **Sizes:** individual zero-length files are allowed; a torrent whose
+  visible (non-pad) total is 0 is rejected, as is a single-file `length <= 0`.
+  Total size overflow is rejected.
+- **Pad files** (`attr` contains `p`) are validated like any file (a pad
+  without a path is rejected), count towards the piece count and offsets, and
+  are excluded from duplicate detection (hybrid torrents repeat `.pad/N`),
+  `files[]` and `sizeBytes`.
+- **v2-only** is detected as "no `pieces` and `meta version` ≥ 2"; any other
+  torrent without `pieces` is rejected as missing pieces. Both are
+  `invalid_torrent`.
+- **Name** is validated as a path component (no `/`, `\`, `.`, `..`, empty)
+  and sanitized like one. `name.utf-8`/`path.utf-8` win when present and
+  non-empty.
+- **Sanitizing (A3):** `<>:"|?*`, control characters and invalid UTF-8 → `_`;
+  each trailing dot/space → `_`; a reserved device stem (CON, PRN, AUX, NUL,
+  COM0–9, LPT0–9, case-insensitive, before the first dot) gets `_` appended
+  (`CON` → `CON_`, `nul.txt` → `nul_.txt`). Duplicate detection runs on the
+  sanitized path, NFC-normalized and case-folded, so `a?` and `a*` collide.
+- **Piece count** above 2²¹ (T6) is rejected.
+- **Non-power-of-two piece length** is logged at INFO by the preview handler.
+- **Upload limit:** the `file` part may be at most 10 MiB (10 485 760 bytes);
+  the whole body may be 1 MiB larger for multipart overhead. Either limit →
+  413 `payload_too_large`. A non-multipart body, a body without a `file` part
+  or a malformed multipart body → 400 `invalid_request`. Other parts are
+  skipped.
+- **GET /api/v1/torrents/preview** → 405 `invalid_request` with `Allow: POST`
+  (the M1 wrong-method convention).
 
-## Next (not M1)
-- M2: replace the stubs with the real bencode and magnet packages, and add
-  `/api/v1/torrents/preview`.
+## Milestone 1 (merged)
+- `go.mod`, `internal/{config,store,clock,api}`, `cmd/torrentd`,
+  `webembed.go`, `tools/depcheck`, `Makefile`. See git history and
+  `retros/2026-11-07-approach-a-m1/` for details and M1 decisions (405 with
+  `invalid_request`, `--dev` 404 JSON, Host without port = port 80, origins).
+
+## Next (not M2)
+- M3: HTTP tracker, peer wire, storage, hash verification.
