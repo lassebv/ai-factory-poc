@@ -136,8 +136,10 @@ func (c *conn) closeWith(err error) {
 	}
 }
 
+// Done is closed once the conn is fully shut down.
 func (c *conn) Done() <-chan struct{} { return c.done }
 
+// Err returns the close reason once Done is closed, nil before.
 func (c *conn) Err() error {
 	select {
 	case <-c.done:
@@ -149,8 +151,10 @@ func (c *conn) Err() error {
 	return c.err
 }
 
+// Remote returns the remote handshake.
 func (c *conn) Remote() Handshake { return c.remote }
 
+// RemoteAddr returns the remote network address.
 func (c *conn) RemoteAddr() net.Addr { return c.nc.RemoteAddr() }
 
 func (c *conn) isClosing() bool {
