@@ -85,7 +85,11 @@ func Decide(in Input, envRole, projectDir string) Decision {
 				role, rel, area.Name, policy.Owners(area))
 		}
 	case "Bash":
-		if v, area, lit := policy.BashViolation(role, fields.Command); v {
+		cwd := in.Cwd
+		if cwd == "" {
+			cwd = projectDir
+		}
+		if v, area, lit := policy.BashViolation(role, fields.Command, filepath.ToSlash(cwd), filepath.ToSlash(projectDir)); v {
 			d.Allow = false
 			d.Target = lit
 			d.Area = area.Name

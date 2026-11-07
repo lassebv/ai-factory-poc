@@ -19,8 +19,8 @@ Your role is your subagent type (`.claude/agents/<role>.md`), or `FACTORY_ROLE` 
 | Area | Paths | Who may write |
 | --- | --- | --- |
 | intent | `project-description.md`, `factory-approaches.md`, `spec/spec-audit.md` | human |
-| factory machinery | `CLAUDE.md`, `.claude/`, `harness/{cmd,internal,hooks}/`, `harness/go.*`, `harness/factory`, `harness/README.md` | human |
-| acceptance | `spec/acceptance.yaml`, the rest of `harness/`, `e2e/`, `*_acceptance_test.go`, `*.acceptance.test.ts(x)` | human, verifier |
+| factory machinery | `CLAUDE.md`, `.claude/`, `harness/{cmd,internal,hooks,prompts}/`, `harness/go.*`, `harness/factory`, `harness/README.md`, `retros/` | human |
+| acceptance | `spec/acceptance.yaml`, the rest of `harness/` (including `harness/_staged/`), `e2e/`, `*_acceptance_test.go`, `*.acceptance.test.ts(x)` | human, verifier |
 | red team | `harness/redteam/` | human, verifier, red-team |
 | contracts | everything else in `spec/` (decisions, OpenAPI, Go API) | human, architect |
 | product | everything else | human, architect, implementer |
@@ -42,6 +42,10 @@ This is enforced in two places:
 
 A test that is missing, skipped or doesn't build never counts as a pass. A test only counts if it is defined in a verifier-owned file.
 
+**Scope beats the definition of done.** If a check can't pass without going beyond your assigned scope, don't expand the scope. Escalate, finish everything else, and say so in your report.
+
+**Staged tests.** Package-level acceptance tests for milestones that haven't started live in `harness/_staged/m<N>/` (Go ignores `_` directories). The verifier promotes them into the product tree with `harness/factory promote --ms <N>` when that milestone starts. Coverage floors apply from the milestone that introduces a package.
+
 ## Commands
 
 ```sh
@@ -50,7 +54,11 @@ harness/factory gate --upto 2 --report   # progress report, always exits 0
 harness/factory gate --id SKEL-01,SEC-02 -v   # specific checks, full failure output
 harness/factory integrity --base main --role implementer
 harness/factory policy implementer internal/api/server.go   # explain a write decision
+harness/factory promote --ms 2       # verifier/human: move staged M2 tests into the tree
+harness/prompts/run-single-agent.sh 2   # human: launch an Approach A run for milestone 2
 ```
+
+**Write file contents with the Write/Edit tools.** Use Bash to run commands, not to write files. The hook only checks real write targets, but Write/Edit is the reliable path and shows up cleanly in the transcript.
 
 ## Engineering conventions
 

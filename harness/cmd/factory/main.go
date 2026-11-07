@@ -8,7 +8,8 @@
 //	factory integrity --base main --role implementer
 //	factory hook                      (Claude Code PreToolUse hook; JSON on stdin)
 //	factory policy <role> <path>...   (explain the write policy)
-//	factory lint-clock | quality | coverage
+//	factory promote --ms 2            (move staged acceptance tests into the product tree)
+//	factory lint-clock | quality | coverage [--upto N]
 package main
 
 import (
@@ -53,6 +54,8 @@ func main() {
 		code = runHook(os.Stdin)
 	case "policy":
 		code = runPolicy(args)
+	case "promote":
+		code = runPromote(args)
 	case "lint-clock", "quality", "coverage":
 		code = runStatic(ctx, cmd, args)
 	default:
@@ -71,6 +74,7 @@ commands:
   integrity   fail if the branch changed files its role may not write (--base, --role)
   hook        Claude Code PreToolUse hook (reads JSON on stdin)
   policy      explain the write policy: factory policy <role> <path>...
+  promote     move harness/_staged/m<N>/ acceptance tests into the product tree (--ms N)
   lint-clock  forbid direct wall-clock use in engine packages (T1)
   quality     doc comments on exported identifiers, file length (ADR-0009)
   coverage    coverage floors per package (ADR-0009)`)
@@ -189,7 +193,13 @@ func runGate(ctx context.Context, args []string) int {
 	}
 
 	started := time.Now().UTC()
-	runner := &gate.Runner{Root: r, DefaultTimeout: *timeout, Log: func(f string, a ...any) {
+	maxMS := 0
+	for _, e := range selected {
+		if e.MS > maxMS {
+			maxMS = e.MS
+		}
+	}
+	runner := &gate.Runner{Root: r, DefaultTimeout: *timeout, MaxMS: maxMS, Log: func(f string, a ...any) {
 		fmt.Fprintf(os.Stderr, "· "+f+"\n", a...)
 	}}
 	results := runner.Run(ctx, selected)
@@ -343,6 +353,8 @@ func runPolicy(args []string) int {
 func runStatic(ctx context.Context, cmd string, args []string) int {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	root := fs.String("root", "", "repo root")
+	defUpto, _ := strconv.Atoi(os.Getenv("GATE_MS_MAX"))
+	upto := fs.Int("upto", defUpto, "coverage: enforce floors only for packages introduced up to milestone N (0 = all; default $GATE_MS_MAX)")
 	_ = fs.Parse(args)
 	r, err := findRoot(*root)
 	if err != nil {
@@ -361,7 +373,12 @@ func runStatic(ctx context.Context, cmd string, args []string) int {
 		findings, err = static.Quality(r)
 	case "coverage":
 		var report string
-		findings, report, err = static.Coverage(ctx, r)
+		entries, lerr := acceptance.Load(filepath.Join(r, "spec", "acceptance.yaml"))
+		if lerr != nil {
+			fmt.Fprintln(os.Stderr, lerr)
+			return 2
+		}
+		findings, report, err = static.Coverage(ctx, r, *upto, acceptance.PackageMilestones(entries))
 		fmt.Print(report)
 	}
 	if err != nil {
@@ -376,5 +393,56 @@ func runStatic(ctx context.Context, cmd string, args []string) int {
 		return 1
 	}
 	fmt.Printf("%s: ok\n", cmd)
+	return 0
+}
+
+// runPromote moves staged acceptance tests for a milestone from
+// harness/_staged/m<N>/ to the same paths in the product tree.
+func runPromote(args []string) int {
+	fs := flag.NewFlagSet("promote", flag.ExitOnError)
+	root := fs.String("root", "", "repo root")
+	ms := fs.Int("ms", 0, "milestone to promote")
+	force := fs.Bool("force", false, "overwrite differing files in the product tree")
+	_ = fs.Parse(args)
+	if *ms <= 0 {
+		fmt.Fprintln(os.Stderr, "--ms is required")
+		return 2
+	}
+	r, err := findRoot(*root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	stage := filepath.Join(r, "harness", "_staged", fmt.Sprintf("m%d", *ms))
+	var moved int
+	err = filepath.WalkDir(stage, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(stage, p)
+		dst := filepath.Join(r, rel)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if old, err := os.ReadFile(dst); err == nil && string(old) != string(data) && !*force {
+			return fmt.Errorf("%s already exists and differs (use --force)", rel)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Println("promoted", filepath.ToSlash(rel))
+		moved++
+		return os.Remove(p)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	_ = os.RemoveAll(stage)
+	fmt.Printf("%d file(s) promoted for milestone %d; commit them before the milestone starts\n", moved, *ms)
 	return 0
 }

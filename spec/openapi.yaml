@@ -17,6 +17,9 @@ info:
     - Every request must carry an allowed Host header (403 forbidden_host).
       State-changing requests with a foreign Origin get 403 forbidden_origin
       (§16.7 G17). These apply to all operations and are not repeated below.
+    - A known route with an unsupported method returns 405 with code
+      invalid_request and an Allow header.
+    - In --dev mode, non-API paths return 404 not_found (the SPA is served by Vite).
     - PATCH bodies use JSON Merge Patch semantics (RFC 7386): absent = unchanged;
       for limits, null = "use global" and -1 = "unlimited". Unknown fields → 400.
 security: []  # localhost-only, no authentication (§1.2); Host/Origin checks apply instead

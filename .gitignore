@@ -15,3 +15,6 @@ coverage.out
 .DS_Store
 /e2e/test-results/
 /e2e/playwright-report/
+*.swp
+*.swo
+*~

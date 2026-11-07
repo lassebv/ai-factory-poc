@@ -80,45 +80,82 @@ func TestParseRole(t *testing.T) {
 }
 
 func TestBashViolation(t *testing.T) {
+	const proj = "/repo"
 	blocked := []string{
 		"echo x >> spec/acceptance.yaml",
 		"sed -i '' 's/a/b/' spec/acceptance.yaml",
 		"rm -rf harness/fixtures",
+		"rm -rf harness",
 		"cd harness && rm -rf fixtures",
+		"cd /repo/harness; rm -rf fixtures",
 		"cp /tmp/x internal/bt/bencode/bencode_acceptance_test.go",
-		"python3 -c 'open(\"CLAUDE.md\",\"w\")'",
+		"python3 -c 'open(\"CLAUDE.md\",\"w\").write(\"x\")'",
+		"python3 - <<'EOF'\nfrom pathlib import Path\nPath('spec/acceptance.yaml').write_text('x')\nEOF",
+		"node -e \"require('fs').writeFileSync('e2e/startup.spec.ts','')\"",
 		"git checkout -- spec/acceptance.yaml",
 		"tee .claude/settings.json < /tmp/x",
+		"echo x | tee -a spec/acceptance.yaml",
 		"mv e2e/startup.spec.ts /tmp/",
-		"cat /Users/me/repo/spec/acceptance.yaml > /dev/stdout; echo hi > spec/acceptance.yaml",
+		"cat /dev/null > /repo/spec/acceptance.yaml",
+		"echo hi > \"$PWD/spec/acceptance.yaml\"",
+		"bash <<'EOF'\nrm spec/acceptance.yaml\nEOF",
+		"bash -c 'rm -f CLAUDE.md'",
+		"find harness/fixtures -name '*.torrent' -delete",
+		"perl -pi -e 's/a/b/' spec/acceptance.yaml",
+		"echo $(rm spec/acceptance.yaml)",
+		"dd if=/dev/zero of=harness/factory bs=1 count=1",
 	}
 	for _, cmd := range blocked {
-		if v, _, _ := BashViolation(Implementer, cmd); !v {
-			t.Errorf("expected implementer to be blocked: %s", cmd)
+		if v, _, _ := BashViolation(Implementer, cmd, proj, proj); !v {
+			t.Errorf("expected implementer to be blocked: %q", cmd)
 		}
 	}
 	allowed := []string{
 		"cat spec/acceptance.yaml",
 		"go test ./internal/... 2>&1 | tail -20",
 		"grep -n TestHealthz harness/acceptance/skeleton/*.go",
+		"grep -r x harness/ > /tmp/out.txt",
+		"cp spec/acceptance.yaml /tmp/copy.yaml",
 		"go build -o /tmp/torrentd ./cmd/torrentd",
 		"echo hi > internal/bt/bencode/notes.txt",
 		"ls spec/ 2>/dev/null",
-		"git commit -m 'implement bencode'",
+		"git commit -m 'implement bencode per spec/contracts/go-api.md'",
 		"echo x > escalations/M1-question.md",
+		// False positives observed in the approach-a-m1 run (factory bug #1):
+		"cat > internal/config/config.go <<'EOF'\n// Default data dir: see spec/contracts/go-api.md\npackage config\nEOF",
+		"python3 - <<'EOF'\np='tools/depcheck/main.go'\ns=open(p).read()\nopen(p,'w').write(s.replace('a','b'))\nEOF\ngo build ./... && harness/factory gate --id DEP-01 -v 2>&1 | tail -12",
+		"printf '%s\\n' 'gate:' '\\tharness/factory gate --ms 1' > Makefile",
+		"git commit -q -m 'M1: depcheck' && harness/factory integrity --base main --role implementer",
+		"lsof -iTCP:8080 -sTCP:LISTEN; harness/factory gate --ms 1 -v 2>&1 | tail -80",
+		"cat >> PROGRESS.md <<'EOF'\nRan harness/factory gate; spec/acceptance.yaml QUAL-01 fails\nEOF",
+		"echo 'see harness/README.md' >&2",
 	}
 	for _, cmd := range allowed {
-		if v, a, lit := BashViolation(Implementer, cmd); v {
-			t.Errorf("expected implementer to be allowed: %s (matched %s in %s)", cmd, lit, a.Name)
+		if v, a, p := BashViolation(Implementer, cmd, proj, proj); v {
+			t.Errorf("expected implementer to be allowed: %q (matched %s in %s)", cmd, p, a.Name)
 		}
 	}
-	if v, _, _ := BashViolation(Human, "rm -rf spec/acceptance.yaml"); v {
+	if v, _, _ := BashViolation(Human, "rm -rf spec/acceptance.yaml", proj, proj); v {
 		t.Error("human must never be blocked")
 	}
-	if v, _, _ := BashViolation(Verifier, "echo x >> spec/acceptance.yaml"); v {
+	if v, _, _ := BashViolation(Verifier, "echo x >> spec/acceptance.yaml", proj, proj); v {
 		t.Error("verifier owns the acceptance matrix")
 	}
-	if v, _, _ := BashViolation(Verifier, "echo x >> harness/internal/policy/policy.go"); !v {
+	if v, _, _ := BashViolation(Verifier, "echo x >> harness/internal/policy/policy.go", proj, proj); !v {
 		t.Error("verifier must not modify the policy")
+	}
+	if v, _, _ := BashViolation(Implementer, "cd /repo/internal && echo x > ../spec/acceptance.yaml", proj, proj); !v {
+		t.Error("relative paths must resolve against the tracked cwd")
+	}
+}
+
+func TestWriteTargetsIgnoresHeredocContent(t *testing.T) {
+	refs := WriteTargets("cat > a.go <<'EOF'\nrm -rf spec\necho > CLAUDE.md\nEOF\necho done > b.txt", "/r")
+	var got []string
+	for _, r := range refs {
+		got = append(got, r.Path)
+	}
+	if len(got) != 2 || got[0] != "a.go" || got[1] != "b.txt" {
+		t.Fatalf("targets = %v, want [a.go b.txt]", got)
 	}
 }

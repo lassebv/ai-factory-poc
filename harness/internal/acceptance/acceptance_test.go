@@ -55,3 +55,17 @@ func TestAcceptsAllKinds(t *testing.T) {
 		t.Fatalf("got %d entries", len(entries))
 	}
 }
+
+func TestPackageMilestones(t *testing.T) {
+	entries, err := Load("../../../spec/acceptance.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := PackageMilestones(entries)
+	if m["internal/bt/bencode"] != 2 || m["internal/bt/metainfo"] != 2 {
+		t.Fatalf("bencode/metainfo should be introduced in M2: %v", m)
+	}
+	if _, ok := m["acceptance/skeleton"]; ok {
+		t.Fatal("harness-module packages are not product packages")
+	}
+}

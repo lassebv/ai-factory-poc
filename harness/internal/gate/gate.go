@@ -56,6 +56,9 @@ type Runner struct {
 	DefaultTimeout time.Duration
 	Exec           ExecFunc
 	Log            func(format string, args ...any)
+	// MaxMS is the highest milestone selected for this run; scripts see it as
+	// GATE_MS_MAX so milestone-scoped checks (coverage) can skip later packages.
+	MaxMS int
 }
 
 func (r *Runner) logf(format string, args ...any) {
@@ -171,7 +174,7 @@ func (r *Runner) locate(module, pkg, name string) (Status, string) {
 	}
 	dir := filepath.Join(modDir, filepath.FromSlash(pkg))
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		return Missing, fmt.Sprintf("package directory %s does not exist", pkg)
+		return Missing, fmt.Sprintf("package directory %s does not exist", pkg) + r.stagedHint(pkg)
 	}
 	defs, err := testDefs(dir)
 	if err != nil {
@@ -179,12 +182,23 @@ func (r *Runner) locate(module, pkg, name string) (Status, string) {
 	}
 	file, ok := defs[name]
 	if !ok {
-		return Missing, fmt.Sprintf("%s is not defined in %s", name, pkg)
+		return Missing, fmt.Sprintf("%s is not defined in %s", name, pkg) + r.stagedHint(pkg)
 	}
 	if !trusted(module, file) {
 		return Fail, fmt.Sprintf("%s is defined in %s, which is not a verifier-owned *_acceptance_test.go file", name, file)
 	}
 	return "", ""
+}
+
+// stagedHint explains where a not-yet-promoted acceptance test lives.
+func (r *Runner) stagedHint(pkg string) string {
+	matches, _ := filepath.Glob(filepath.Join(r.Root, "harness", "_staged", "m*", filepath.FromSlash(pkg), "*_acceptance_test.go"))
+	if len(matches) == 0 {
+		return ""
+	}
+	rel, _ := filepath.Rel(r.Root, matches[0])
+	ms := strings.TrimPrefix(strings.Split(filepath.ToSlash(rel), "/")[2], "m")
+	return fmt.Sprintf(" (staged in %s; the verifier promotes it with `harness/factory promote --ms %s` when milestone %s starts)", filepath.ToSlash(filepath.Dir(rel)), ms, ms)
 }
 
 type testEvent struct {
@@ -313,7 +327,7 @@ func (r *Runner) runOther(ctx context.Context, e acceptance.Entry) Result {
 		if !exists(c.Script) {
 			return Result{Status: Missing, Detail: c.Script + " does not exist"}
 		}
-		return run(r.Root, []string{"GATE_ROOT=" + r.Root}, "bash", filepath.Join(r.Root, c.Script))
+		return run(r.Root, []string{"GATE_ROOT=" + r.Root, fmt.Sprintf("GATE_MS_MAX=%d", r.MaxMS)}, "bash", filepath.Join(r.Root, c.Script))
 	case "fuzz":
 		if st, detail := r.locate("", c.Fuzz, c.Target); st != "" {
 			return Result{Status: st, Detail: detail}

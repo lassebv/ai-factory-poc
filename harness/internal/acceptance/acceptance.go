@@ -193,3 +193,29 @@ func Validate(entries []Entry) error {
 	}
 	return errors.Join(errs...)
 }
+
+// PackageMilestones maps each product package referenced by a go or fuzz
+// check (repo-relative, e.g. "internal/bt/bencode") to the earliest
+// milestone that checks it, i.e. the milestone that introduces it.
+func PackageMilestones(entries []Entry) map[string]int {
+	m := map[string]int{}
+	for _, e := range entries {
+		pkg := ""
+		switch e.Check.Kind() {
+		case "go":
+			if e.Check.Module == "" {
+				pkg = e.Check.Go
+			}
+		case "fuzz":
+			pkg = e.Check.Fuzz
+		}
+		if pkg == "" {
+			continue
+		}
+		pkg = strings.TrimPrefix(pkg, "./")
+		if cur, ok := m[pkg]; !ok || e.MS < cur {
+			m[pkg] = e.MS
+		}
+	}
+	return m
+}

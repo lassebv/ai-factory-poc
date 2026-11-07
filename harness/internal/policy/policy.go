@@ -7,7 +7,6 @@ package policy
 import (
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -79,7 +78,7 @@ var Areas = []Area{
 		Name:     "factory-machinery",
 		Owners:   []Role{Human},
 		Exact:    []string{"CLAUDE.md", "harness/go.mod", "harness/go.sum", "harness/factory", "harness/README.md"},
-		Prefixes: []string{".claude/", ".git/", "harness/cmd/", "harness/internal/", "harness/hooks/"},
+		Prefixes: []string{".claude/", ".git/", "harness/cmd/", "harness/internal/", "harness/hooks/", "harness/prompts/", "retros/"},
 	},
 	{
 		Name:     "shared",
@@ -143,62 +142,6 @@ func AreaFor(rel string) Area {
 func CanWrite(role Role, rel string) (bool, Area) {
 	a := AreaFor(rel)
 	return a.Allows(role), a
-}
-
-var (
-	benignRedirect = regexp.MustCompile(`\d?>&\d|&?\d?>>?\s*/dev/null`)
-	writeIndicator = regexp.MustCompile(strings.Join([]string{
-		`>`,
-		`\b(rm|rmdir|mv|cp|tee|touch|truncate|dd|ln|chmod|chown|install|rsync|patch|unlink|mkdir)\b`,
-		`\bsed\s+(-\w*i|--in-place)`,
-		`\bperl\s+-\w*i`,
-		`\bgit\s+(checkout|restore|rm|mv|reset|apply|stash|clean|switch|am|cherry-pick|merge|rebase|commit)\b`,
-		`\b(python3?|node|ruby|perl|deno|bun)\s+-`,
-		`\bgo\s+generate\b`,
-	}, "|"))
-)
-
-var tokenSplit = regexp.MustCompile("[\\s;|&<>()'\"=`]+")
-
-// candidates returns the repo-relative interpretations of a path token: the
-// token itself and every suffix after a "/", so absolute paths and paths with
-// a leading "../" still resolve to the area they name.
-func candidates(tok string) []string {
-	p := Normalize(tok)
-	out := []string{p}
-	for i := 0; i < len(p); i++ {
-		if p[i] == '/' && i+1 < len(p) {
-			out = append(out, p[i+1:])
-		}
-	}
-	return out
-}
-
-// BashViolation is a heuristic: it reports a protected area when a shell
-// command both names a path the role may not write and contains a write
-// operation. Product code is not checked here. It errs on the side of
-// blocking; the integrity check at the gate is the authoritative enforcement.
-func BashViolation(role Role, cmd string) (bool, Area, string) {
-	if role == Human {
-		return false, Area{}, ""
-	}
-	stripped := benignRedirect.ReplaceAllString(cmd, " ")
-	if !writeIndicator.MatchString(stripped) {
-		return false, Area{}, ""
-	}
-	product := Areas[len(Areas)-1].Name
-	for _, tok := range tokenSplit.Split(stripped, -1) {
-		if tok == "" || strings.HasPrefix(tok, "-") {
-			continue
-		}
-		for _, c := range candidates(tok) {
-			a := AreaFor(c)
-			if a.Name != product && !a.Allows(role) {
-				return true, a, c
-			}
-		}
-	}
-	return false, Area{}, ""
 }
 
 // Owners renders an area's owners for messages.

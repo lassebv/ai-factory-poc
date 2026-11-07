@@ -251,8 +251,11 @@ func CoverageFloor(relDir string) float64 {
 var coverRE = regexp.MustCompile(`coverage:\s+([0-9.]+)% of statements`)
 
 // Coverage runs `go test -cover ./...` in root and checks every package
-// against its floor. Packages without tests count as 0%.
-func Coverage(ctx context.Context, root string) ([]Finding, string, error) {
+// against its floor. Packages without tests count as 0%. A floor is enforced
+// from the milestone that introduces the package (intro, from the acceptance
+// matrix): when upto > 0, packages introduced after milestone upto are
+// reported but not enforced.
+func Coverage(ctx context.Context, root string, upto int, intro map[string]int) ([]Finding, string, error) {
 	cmdMod := exec.CommandContext(ctx, "go", "list", "-m")
 	cmdMod.Dir = root
 	modOut, err := cmdMod.Output()
@@ -303,7 +306,15 @@ func Coverage(ctx context.Context, root string) ([]Finding, string, error) {
 			}
 			pct, _ = strconv.ParseFloat(m[1], 64)
 		}
-		fmt.Fprintf(&report, "%-40s %6.1f%%  floor %4.0f%%  %s\n", relDir, pct, floor, status)
+		if ms := intro[relDir]; upto > 0 && ms > upto {
+			fmt.Fprintf(&report, "%-40s %6.1f%%  not enforced before M%d  %s\n", relDir, pct, ms, status)
+			continue
+		}
+		verdict := status
+		if floor >= 0 && status == "ok" && pct < floor {
+			verdict = "BELOW FLOOR"
+		}
+		fmt.Fprintf(&report, "%-40s %6.1f%%  floor %4.0f%%  %s\n", relDir, pct, floor, verdict)
 		if floor < 0 {
 			continue
 		}

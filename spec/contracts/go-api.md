@@ -24,6 +24,9 @@ Black-box tests depend on the following:
 | Shutdown | SIGINT or SIGTERM leads to a graceful shutdown (§6.2) and exit code 0 within 10 s |
 | Peer port in tests | Tests pass `--peer-port 0`, which means "pick any free port". In M1, before the engine exists, the flag only needs to be accepted. |
 | Dev mode | `--dev` allows the origins `http://localhost:5173` and `http://127.0.0.1:5173`. |
+| Dev mode, SPA | With `--dev`, `GET /` and other non-API paths return 404 `not_found` JSON. The SPA is served by Vite. *(Adopted from the M1 run.)* |
+| Wrong method | A known route requested with an unsupported method returns 405 with code `invalid_request` and an `Allow` header. *(Adopted from the M1 run.)* |
+| Host without port | A `Host` header without a port means port 80, so it's only allowed when the server listens on port 80. *(Adopted from the M1 run.)* |
 
 ## `tools/depcheck`
 

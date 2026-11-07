@@ -14,6 +14,8 @@ harness/
     integrity/         git-diff check at merge time (enforcement)
     static/            clock lint, doc-comment/file-length check, coverage floors
   hooks/               pre-tool-use.sh (wired up in .claude/settings.json), build.sh
+  prompts/             versioned run prompts + run-single-agent.sh launcher (Approach A)
+  _staged/m<N>/        package-level acceptance tests for milestones not started yet (Go ignores _dirs)
   checks/*.sh          script checks referenced by spec/acceptance.yaml
   acceptance/          black-box Go acceptance tests that build and run ./cmd/torrentd
     internal/app/      launcher: build once, start with temp HOME/data dir/port, wait for /healthz
@@ -27,7 +29,7 @@ harness/
   oracle/              Docker image with Transmission + libtorrent (independent oracles)
 ```
 
-Package-level acceptance tests for the pinned APIs live in the product tree, as verifier-owned `*_acceptance_test.go` files: `internal/bt/bencode/`, `internal/bt/metainfo/`. Playwright tests live in `e2e/`.
+Package-level acceptance tests for the pinned APIs are verifier-owned `*_acceptance_test.go` files. Until their milestone starts they wait in `harness/_staged/m<N>/`; `harness/factory promote --ms <N>` moves them into the product tree (e.g. `internal/bt/bencode/`). Committing them early breaks `go vet ./...` and coverage for the current milestone (finding from the M1 run). Playwright tests live in `e2e/`.
 
 ## Running
 
@@ -81,7 +83,7 @@ A throwaway reference implementation of milestones 1–2 was written **outside t
 
 ## Known limitations
 
-- The Bash part of the hook is a heuristic. The integrity check is the real enforcement, and it needs git commits to compare against.
+- The Bash part of the hook parses commands for their real write targets: redirections, `tee`, `rm`/`mv`/`cp`/…, `sed -i`, `git checkout -- <path>`, `bash -c` and heredoc-fed shells, and literal paths in inline Python/Node code. Heredoc bodies and quoted text are content, not targets. A write through a variable path inside an inline script is not caught. The integrity check is the real enforcement. (v1 blocked any write command that merely mentioned a protected path; that caused 4 false positives in the M1 run.)
 - Subagents of the interactive (human) session are `unknown`, so they can't write product code. Use the role-named agents.
 - The NFR, interop and E2E checks for later milestones are placeholders. The verifier refines them before each milestone starts.
 - `TestNonLoopbackWarning` binds `0.0.0.0`. On macOS the application firewall may ask once for permission.
