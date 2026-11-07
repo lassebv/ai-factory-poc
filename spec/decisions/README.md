@@ -15,5 +15,9 @@ ADRs record decisions that involve a real trade-off and were made by the human o
 | [0009](0009-quality-gates.md) | Code-quality gates | A14 | Accepted |
 | [0010](0010-schema-evolution.md) | Schema evolution before and after v1 | T7 | Accepted |
 | [0011](0011-m3-download-api-and-frozen-contracts.md) | M3 pulls a minimal add/get API forward; `contract.go` files are frozen | §15.3 | Accepted |
+| [0012](0012-m3-contract-shape-and-piece-order.md) | M3 contract shape; in-order piece selection at M3 | §4.1, A5 | Accepted |
+| [0013](0013-m3-storage-write-through-and-verify-from-disk.md) | Blocks are written on arrival; pieces are verified from disk | §4.5, D9 | Accepted |
+| [0014](0014-m3-tracker-announce-loop.md) | The tracker package owns the per-torrent announce loop | A4, D7 | Accepted |
+| [0015](0015-m3-torrent-actor-and-shutdown.md) | Torrent actor, published snapshots, shutdown order | §4.5, §6.2 | Accepted |
 
 **New ADRs:** number them sequentially, use the same template (Context / Decision / Consequences), and add a row here. The architect role writes them, and the human approves them if they change scope, risk or the API contract.
