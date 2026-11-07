@@ -2,7 +2,11 @@
 # Launch an Approach A run: one headless implementer session on one milestone,
 # in its own git worktree and branch, with a full transcript for the retro.
 #
-#   harness/prompts/run-single-agent.sh <milestone> [budget-usd]
+#   harness/prompts/run-single-agent.sh [--base REF] [--tag NAME] <milestone> [budget-usd]
+#
+# --base starts the branch from REF instead of main (e.g. to rerun a milestone
+# from the same starting point as another approach); --tag changes the
+# branch/worktree/run suffix (default: approach-a).
 #
 # Creates ../<repo>-m<N>a on branch impl/m<N>-approach-a from main, renders
 # the prompt (single-agent-implementer.md + scope-m<N>.md) and writes
@@ -13,14 +17,18 @@ set -euo pipefail
 # in-flight responses ("Your computer went to sleep mid-response"). Lid-close
 # sleep can't be prevented this way; keep the lid open (or use clamshell on power).
 AWAKE=(); command -v caffeinate >/dev/null && AWAKE=(caffeinate -ims)
-MS="${1:?usage: run-single-agent.sh <milestone> [budget-usd]}"
+BASEREF=main; TAG=approach-a
+while [ "${1:-}" = "--base" ] || [ "${1:-}" = "--tag" ]; do
+  case "$1" in --base) BASEREF="$2";; --tag) TAG="$2";; esac; shift 2
+done
+MS="${1:?usage: run-single-agent.sh [--base REF] [--tag NAME] <milestone> [budget-usd]}"
 BUDGET="${2:-25}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROMPTS="$ROOT/harness/prompts"
 SCOPE="$PROMPTS/scope-m$MS.md"
-BRANCH="impl/m$MS-approach-a"
-WT="$(dirname "$ROOT")/$(basename "$ROOT")-m${MS}a"
-RUN="$ROOT/runs/approach-a-m$MS"
+BRANCH="impl/m$MS-$TAG"
+WT="$(dirname "$ROOT")/$(basename "$ROOT")-m${MS}-$TAG"
+RUN="$ROOT/runs/$TAG-m$MS"
 
 [ -f "$SCOPE" ] || { echo "missing $SCOPE"; exit 2; }
 if [ -n "$(find "$ROOT/harness/_staged/m$MS" -type f ! -name '.*' 2>/dev/null)" ]; then
@@ -31,7 +39,7 @@ fi
 [ -z "$(git -C "$ROOT" status --porcelain)" ] || { echo "main checkout is dirty; commit first" >&2; exit 2; }
 [ ! -e "$WT" ] || { echo "$WT already exists" >&2; exit 2; }
 
-git -C "$ROOT" worktree add -q "$WT" -b "$BRANCH" main
+git -C "$ROOT" worktree add -q "$WT" -b "$BRANCH" "$BASEREF"
 [ -f "$WT/e2e/package-lock.json" ] && (cd "$WT/e2e" && npm ci --no-audit --no-fund >/dev/null)
 
 mkdir -p "$RUN"
