@@ -77,8 +77,7 @@ func New(opts Options) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("/healthz", methodNotAllowed("GET, HEAD"))
-	mux.HandleFunc("POST /api/v1/torrents/preview", s.previewTorrent)
-	mux.HandleFunc("/api/v1/torrents/preview", methodNotAllowed("POST"))
+	s.routeTorrents(mux)
 	mux.HandleFunc("/api/", notFound)
 	mux.HandleFunc("/", s.static)
 
