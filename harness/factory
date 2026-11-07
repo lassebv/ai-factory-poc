@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Entry point for the factory harness: harness/factory <command> [flags]
+# Builds harness/bin/factory on demand. See harness/README.md.
+set -eu
+HARNESS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$HARNESS/hooks/build.sh" >&2
+exec "$HARNESS/bin/factory" "$@"

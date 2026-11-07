@@ -1,0 +1,2 @@
+torrentd github.com/anacrolix/torrent@v1.58.1
+github.com/anacrolix/torrent@v1.58.1 github.com/anacrolix/dht/v2@v2.21.1

@@ -1,0 +1,1056 @@
+# Acceptance matrix for torrentd.
+#
+# This maps each requirement to an executable check. It is the factory's
+# definition of done, and "% of entries passing" is its progress bar.
+#
+# OWNERSHIP: This file and every check it names belong to the VERIFIER role.
+# Implementer agents cannot edit them: the write-policy hook blocks them, and
+# `factory integrity` fails the merge if they try. If a check is wrong, write
+# an escalation in escalations/.
+#
+# Run it:  harness/factory gate --ms 1      (see harness/README.md)
+# Status is never stored here: the gate writes results to runs/gate/.
+#
+# Fields:
+#   id       Stable identifier. Never reuse an ID.
+#   src      Spec section(s) and/or audit IDs (spec/spec-audit.md).
+#   ms       Milestone from §15 (1 skeleton … 8 hardening).
+#   tier     Harness tier: L0 static, L1 unit, L2 fuzz, L3 component, L4 swarm,
+#            L5 interop, L6 E2E, L7 NFR (see factory-approaches.md §3.2).
+#   text     The requirement, stated so it can be checked.
+#   timeout  Optional per-check timeout (default 10m).
+#   check    How the gate runs it. Exactly one kind:
+#     go:         {go: ./pkg, run: TestX}
+#                 A test in the product module (repo root). It only counts if
+#                 TestX is defined in a *_acceptance_test.go file.
+#     go+harness: {go: ./acceptance/pkg, module: harness, run: TestX}
+#                 A black-box test in harness/acceptance/ that builds and runs
+#                 the real binary (preferred: it doesn't constrain internals).
+#     fuzz:       {fuzz: ./pkg, target: FuzzX, time: 30s}   (in an acceptance file)
+#     vitest:     {vitest: web/**/*.acceptance.test.ts(x)}
+#     playwright: {playwright: e2e/**/*.spec.ts}
+#     script:     {script: harness/checks/<name>.sh}  (exit 0 = pass)
+#     manual:     {manual: <procedure>}  (not gated; recorded at milestones)
+#
+# Package-level checks call APIs pinned in spec/contracts/go-api.md. Checks for
+# milestones 3+ are placeholders: the verifier refines them (preferring
+# black-box) before that milestone starts.
+
+# ───────────────────────── §14 Acceptance criteria ─────────────────────────
+
+- id: AC-01
+  src: "§14.1"
+  ms: 1
+  tier: L6
+  text: "`./torrentd` starts with no arguments and http://127.0.0.1:8080 serves the UI."
+  check: {playwright: e2e/startup.spec.ts}
+
+- id: AC-02
+  src: "§14.2, §2, T5"
+  ms: 1
+  tier: L0
+  text: "go.mod contains no BitTorrent/bencode/DHT/tracker libraries; tools/depcheck passes."
+  check: {script: harness/checks/depcheck.sh}
+
+- id: AC-03
+  src: "§14.3"
+  ms: 7
+  tier: L6
+  text: "User adds a .torrent or a magnet, chooses a folder, deselects files, and sees the torrent in the list within 1 s."
+  check: {playwright: e2e/add-torrent.spec.ts}
+
+- id: AC-04
+  src: "§14.4"
+  ms: 7
+  tier: L6
+  text: "While downloading, the list shows ↓/↑ speed, progress, ETA and peers/seeds, updating every second."
+  check: {playwright: e2e/live-stats.spec.ts}
+
+- id: AC-05
+  src: "§14.5"
+  ms: 7
+  tier: L6
+  text: "On completion the torrent moves to Seeding automatically and shows upload speed, uploaded total, ratio, seed time and added date."
+  check: {playwright: e2e/seeding.spec.ts}
+
+- id: AC-06
+  src: "§14.6, §5.2"
+  ms: 4
+  tier: L4
+  text: "Stop seeding: no further upload bytes, a `stopped` announce reaches the tracker, files are kept; Resume seeding brings it back to Seeding."
+  check: {go: ./tools/swarm, run: TestStopSeeding}
+
+- id: AC-06-UI
+  src: "§14.6, §13 E2E"
+  ms: 7
+  tier: L6
+  text: "UI flow: add → Seeding → click Stop seeding → Stopped → Resume seeding → Seeding."
+  check: {playwright: e2e/stop-seeding.spec.ts}
+
+- id: AC-07
+  src: "§14.7, §5.2"
+  ms: 6
+  tier: L4
+  text: "Reaching a ratio or seeding-time limit stops seeding automatically with stop_reason ratio_limit/time_limit, and the UI shows the reason."
+  check: {go: ./tools/swarm, run: TestSeedingLimitAutoStop}
+
+- id: AC-08
+  src: "§14.8"
+  ms: 7
+  tier: L6
+  text: "Pause/resume, recheck, reannounce, queue reordering, file priorities, per-torrent and global speed limits, and remove (with and without data) work and appear in the UI immediately."
+  check: {playwright: e2e/actions.spec.ts}
+
+- id: AC-09
+  src: "§14.9"
+  ms: 5
+  tier: L4
+  text: "Peers are discovered via HTTP trackers, UDP trackers, DHT, PEX and LSD, and each peer's `source` is reported correctly."
+  check: {go: ./tools/swarm, run: TestDiscoverySources}
+
+- id: AC-10
+  src: "§14.10, T4, C2"
+  ms: 8
+  tier: L5
+  text: "A torrent downloaded by torrentd can be seeded to qBittorrent and Transmission, and the other way around."
+  check: {script: harness/checks/interop.sh}
+
+- id: AC-11
+  src: "§14.11, C3"
+  ms: 8
+  tier: L6
+  text: "After a restart, all torrents reappear with their desired state, their progress (no full recheck when files are unchanged) and their lifetime totals."
+  check: {playwright: e2e/restart.spec.ts}
+
+- id: AC-12
+  src: "§14.12"
+  ms: 7
+  tier: L6
+  text: "Invalid files, bad magnets, duplicates and unwritable directories produce clear inline errors in the add dialog."
+  check: {playwright: e2e/add-errors.spec.ts}
+
+- id: AC-13
+  src: "§14.13, §11 portability, §11 binary size"
+  ms: 1
+  tier: L0
+  text: "CGO_ENABLED=0 builds for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64; each binary is under 40 MB and runs with no other files."
+  check: {script: harness/checks/cross-check.sh}
+
+# ───────────────────────── M1 Skeleton ─────────────────────────
+
+- id: SKEL-01
+  src: "§8.1"
+  ms: 1
+  tier: L3
+  text: "GET /healthz returns 200 with body `ok`."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestHealthz}
+
+- id: SKEL-02
+  src: "§3, §7.1, §16.6, T7"
+  ms: 1
+  tier: L3
+  text: "On first start the embedded migrations create the §7.1 schema plus the §16.6 additions (global_stats, banned_peers.expires_at) and record their versions in schema_migrations; a restart applies nothing new."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestMigrations}
+
+- id: SKEL-03
+  src: "§6 Store"
+  ms: 1
+  tier: L3
+  text: "The database file <data-dir>/torrentd.db is in WAL journal mode. (busy_timeout and foreign_keys are per-connection and not observable from outside; they are left to implementer tests and review.)"
+  check: {go: ./acceptance/skeleton, module: harness, run: TestWALMode}
+
+- id: SKEL-04
+  src: "§6 HTTP, §8"
+  ms: 1
+  tier: L3
+  text: "GET / and unknown non-/api paths return index.html (200, text/html); unknown /api/ paths return 404 with the §8 error shape and code not_found."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestSPAFallback}
+
+- id: SKEL-05
+  src: "§10, §7"
+  ms: 1
+  tier: L3
+  text: "--addr and --data-dir take precedence over TORRENTD_ADDR and TORRENTD_DATA_DIR, which take precedence over the defaults; with neither, the database is created in the OS default data dir."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestConfigPrecedence}
+
+- id: SKEL-06
+  src: "§11 security"
+  ms: 1
+  tier: L3
+  text: "Binding a non-loopback --addr logs a WARN-level line naming the address (as given, or as the listener reports it)."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestNonLoopbackWarning}
+
+- id: SKEL-07
+  src: "§6.2"
+  ms: 1
+  tier: L3
+  text: "SIGINT and SIGTERM shut the process down cleanly (exit code 0) within 10 s."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestGracefulShutdown}
+
+- id: SEC-01
+  src: "G17"
+  ms: 1
+  tier: L3
+  text: "Every request whose Host header is not on the allowlist (localhost, 127.0.0.1, [::1] with the configured port) gets 403 forbidden_host."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestHostAllowlist}
+
+- id: SEC-02
+  src: "§11, G17"
+  ms: 1
+  tier: L3
+  text: "State-changing requests (POST, PUT, PATCH, DELETE) with a foreign Origin get 403 forbidden_origin before routing; a same-origin or missing Origin passes through."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestOriginCheck}
+
+- id: SEC-03
+  src: "§10 --dev, G17"
+  ms: 1
+  tier: L3
+  text: "With --dev, the Vite origin (http://localhost:5173) is allowed and gets CORS headers, and the embedded SPA is not served; without --dev that origin is rejected."
+  check: {go: ./acceptance/skeleton, module: harness, run: TestDevMode}
+
+- id: DEP-01
+  src: "§2, T5"
+  ms: 1
+  tier: L3
+  text: "tools/depcheck rejects module graphs with a denylisted module at any depth, a direct requirement outside golang.org/x/* and modernc.org/*, or a module not reachable from the allowed direct requirements."
+  check: {go: ./acceptance/depcheck, module: harness, run: TestRejects}
+
+- id: DEP-02
+  src: "§2, T5"
+  ms: 1
+  tier: L3
+  text: "tools/depcheck accepts real-world graphs: no dependencies, or golang.org/x/* and modernc.org/sqlite with their transitive dependencies, `// indirect` requirements and the go/toolchain pseudo-modules."
+  check: {go: ./acceptance/depcheck, module: harness, run: TestAccepts}
+
+- id: LINT-01
+  src: "T1"
+  ms: 1
+  tier: L0
+  text: "No direct time.Now/Since/Until/After/AfterFunc/Tick/NewTimer/NewTicker/Sleep in non-test files under internal/bt, internal/stats or internal/store."
+  check: {script: harness/checks/lint-clock.sh}
+
+# ───────────────────────── M2 Bencode + metainfo ─────────────────────────
+
+- id: BENC-01
+  src: "§4.1 Bencode, §13, contracts/go-api.md"
+  ms: 2
+  tier: L1
+  text: "Round-trip and table tests for integers, strings, lists, dicts and struct tags (`bencode:\"name\"`, `omitempty`, `-`); Marshal output is canonical."
+  check: {go: ./internal/bt/bencode, run: TestRoundTrip}
+
+- id: BENC-02
+  src: "§4.1, A1"
+  ms: 2
+  tier: L1
+  text: "UnmarshalStrict rejects non-canonical integers (i03e, i-0e, i-e, ie), non-canonical lengths, unsorted or duplicate dict keys and trailing data."
+  check: {go: ./internal/bt/bencode, run: TestStrictRejects}
+
+- id: BENC-03
+  src: "A1"
+  ms: 2
+  tier: L1
+  text: "Unmarshal (lenient) accepts unsorted keys but still rejects malformed input and trailing data."
+  check: {go: ./internal/bt/bencode, run: TestLenient}
+
+- id: BENC-04
+  src: "§4.1"
+  ms: 2
+  tier: L1
+  text: "RawMessage captures the exact input bytes of a value, and Marshal writes them back verbatim."
+  check: {go: ./internal/bt/bencode, run: TestRawMessagePreserved}
+
+- id: BENC-05
+  src: "§11 robustness, T6"
+  ms: 2
+  tier: L1
+  text: "Nesting deeper than 64 and string lengths beyond the remaining input are rejected without large allocations."
+  check: {go: ./internal/bt/bencode, run: TestLimits}
+
+- id: BENC-06
+  src: "§11, §13"
+  ms: 2
+  tier: L2
+  text: "Fuzz: decoding never panics, and decode→encode→decode is stable for anything that decodes."
+  check: {fuzz: ./internal/bt/bencode, target: FuzzDecode, time: 30s}
+
+- id: MAG-01
+  src: "§4.1 Magnet, contracts/go-api.md"
+  ms: 2
+  tier: L1
+  text: "ParseMagnet handles btih in hex (any case) and base32, plus dn, tr (repeated) and x.pe."
+  check: {go: ./internal/bt/metainfo, run: TestParseMagnet}
+
+- id: MAG-02
+  src: "§8.2"
+  ms: 2
+  tier: L1
+  text: "ParseMagnet rejects a missing btih, wrong hash lengths, bad base32/hex and non-magnet schemes."
+  check: {go: ./internal/bt/metainfo, run: TestParseMagnetInvalid}
+
+- id: META-01
+  src: "§4.1 Metainfo, §13"
+  ms: 2
+  tier: L3
+  text: "Preview of real-world and synthetic torrents (single-file, multi-file, private, announce-list) matches the oracle: id (v1 info-hash), name, piece length/count, private flag, files, sizes and trackers."
+  check: {go: ./acceptance/preview, module: harness, run: TestPreviewMatchesOracle}
+
+- id: META-02
+  src: "§4.1, §11 security"
+  ms: 2
+  tier: L3
+  text: "Torrents with `..`, `.`, empty or separator-containing path components, or absolute paths are rejected with 400 invalid_torrent."
+  check: {go: ./acceptance/preview, module: harness, run: TestRejectsUnsafePaths}
+
+- id: META-03
+  src: "A3"
+  ms: 2
+  tier: L3
+  text: "Torrents with duplicate paths (exact, after case-folding, or after NFC normalization) are rejected."
+  check: {go: ./acceptance/preview, module: harness, run: TestRejectsDuplicatePaths}
+
+- id: META-04
+  src: "A3"
+  ms: 2
+  tier: L3
+  text: "Windows-invalid characters and trailing dots/spaces are replaced with `_`; reserved device names (CON, nul.txt) are changed so they are no longer reserved."
+  check: {go: ./acceptance/preview, module: harness, run: TestSanitizesWindowsNames}
+
+- id: META-05
+  src: "A3"
+  ms: 2
+  tier: L3
+  text: "name.utf-8 and path.utf-8 are preferred over name and path."
+  check: {go: ./acceptance/preview, module: harness, run: TestPrefersUTF8Fields}
+
+- id: META-06
+  src: "§4.1, A2"
+  ms: 2
+  tier: L3
+  text: "Piece length outside 16 KiB–256 MiB, missing or negative, and pieces whose length is not 20×ceil(total/pieceLength) are rejected; a non-power-of-two piece length is accepted."
+  check: {go: ./acceptance/preview, module: harness, run: TestValidatesPieces}
+
+- id: META-07
+  src: "C2, ADR-0001"
+  ms: 2
+  tier: L3
+  text: "Hybrid torrents are accepted through their v1 view (v1 info-hash), and BEP 47 pad files are hidden from files[] and sizeBytes."
+  check: {go: ./acceptance/preview, module: harness, run: TestHybridV1View}
+
+- id: META-08
+  src: "C2, ADR-0001"
+  ms: 2
+  tier: L3
+  text: "v2-only torrents are rejected with 400 invalid_torrent."
+  check: {go: ./acceptance/preview, module: harness, run: TestRejectsV2Only}
+
+- id: META-09
+  src: "§4.1"
+  ms: 2
+  tier: L3
+  text: "Structurally invalid metainfo (not bencode, not a dict, missing or mistyped name/length/files, negative or zero sizes) is rejected with 400 invalid_torrent."
+  check: {go: ./acceptance/preview, module: harness, run: TestRejectsMalformed}
+
+- id: META-10
+  src: "§4.1, A1"
+  ms: 2
+  tier: L3
+  text: "Non-canonical integers and unsorted or duplicate keys inside the info dict are rejected end to end."
+  check: {go: ./acceptance/preview, module: harness, run: TestStrictInfoDict}
+
+- id: META-11
+  src: "§4.1"
+  ms: 2
+  tier: L3
+  text: "The info-hash is computed from the original info bytes, including keys torrentd does not understand."
+  check: {go: ./acceptance/preview, module: harness, run: TestInfoHashFromRawBytes}
+
+- id: PREV-01
+  src: "§8.1 preview, §15.2, spec/openapi.yaml"
+  ms: 2
+  tier: L3
+  text: "POST /api/v1/torrents/preview returns a TorrentPreview exactly as specified in spec/openapi.yaml; a request without a `file` part returns 400 invalid_request."
+  check: {go: ./acceptance/preview, module: harness, run: TestPreviewShape}
+
+- id: PREV-02
+  src: "§8.2, §11"
+  ms: 2
+  tier: L3
+  text: "A file over 10 MiB returns 413 payload_too_large; a file just under the limit is parsed (400 invalid_torrent for junk)."
+  check: {go: ./acceptance/preview, module: harness, run: TestUploadLimit}
+
+# ───────────────────────── M3 Single-peer download ─────────────────────────
+
+- id: TRK-01
+  src: "§4.1 HTTP trackers"
+  ms: 3
+  tier: L3
+  text: "HTTP announce: started/completed/stopped events, compact and non-compact peers, interval and min interval, tracker id, failure reason and warning message."
+  check: {go: ./internal/bt/tracker, run: TestHTTPAnnounce}
+
+- id: TRK-02
+  src: "D7"
+  ms: 3
+  tier: L1
+  text: "Announce parameters are compact=1 and numwant=50, with a `key` that stays stable for the session."
+  check: {go: ./internal/bt/tracker, run: TestAnnounceParams}
+
+- id: WIRE-01
+  src: "§4.1 Peer wire, D13"
+  ms: 3
+  tier: L1
+  text: "The handshake works over net.Pipe; the peer ID matches `-TD0100-` followed by 12 bytes."
+  check: {go: ./internal/bt/peer, run: TestHandshake}
+
+- id: WIRE-02
+  src: "§11 robustness"
+  ms: 3
+  tier: L1
+  text: "Messages over 16 KiB+13 bytes (other than bitfield and metadata) cause a disconnect."
+  check: {go: ./internal/bt/peer, run: TestOversizeMessage}
+
+- id: WIRE-03
+  src: "T6"
+  ms: 3
+  tier: L1
+  text: "A request for more than 16 KiB gets reject_request (fast extension) or a disconnect."
+  check: {go: ./internal/bt/peer, run: TestOversizeRequest}
+
+- id: WIRE-04
+  src: "§11, §13"
+  ms: 3
+  tier: L2
+  text: "Fuzz: the wire message decoder never panics."
+  check: {fuzz: ./internal/bt/peer, target: FuzzDecodeMessage, time: 30s}
+
+- id: STOR-01
+  src: "§4.1 Storage, §13"
+  ms: 3
+  tier: L1
+  text: "Pieces that span file boundaries are read and written correctly."
+  check: {go: ./internal/bt/storage, run: TestSpanningPieces}
+
+- id: STOR-02
+  src: "G21"
+  ms: 3
+  tier: L1
+  text: "Files are named `<file>.part` until all their pieces are verified, then renamed; toggling use_part_files affects only incomplete files."
+  check: {go: ./internal/bt/storage, run: TestPartFiles}
+
+- id: STOR-03
+  src: "§4.3, G21"
+  ms: 3
+  tier: L1
+  text: "The skipped part of a boundary piece goes to `.torrentd-<infohash>.parts`; changing skip→wanted copies the bytes into the file."
+  check: {go: ./internal/bt/storage, run: TestSkipBoundaryParts}
+
+- id: STOR-04
+  src: "C2"
+  ms: 3
+  tier: L1
+  text: "Pad files are never created on disk, and they hash as zeros."
+  check: {go: ./internal/bt/storage, run: TestPadFiles}
+
+- id: STOR-05
+  src: "§4.1 Hash verification"
+  ms: 3
+  tier: L1
+  text: "A piece that fails its hash check is discarded and its bytes are added to wasted."
+  check: {go: ./internal/bt/storage, run: TestHashFailure}
+
+- id: STOR-06
+  src: "§4.1, D9"
+  ms: 3
+  tier: L1
+  text: "The open-file-handle LRU never exceeds its cap (default 128)."
+  check: {go: ./internal/bt/storage, run: TestFDCache}
+
+- id: STOR-07
+  src: "§11 security"
+  ms: 3
+  tier: L1
+  text: "Storage can never create or write a path outside download_dir, even with crafted metainfo."
+  check: {go: ./internal/bt/storage, run: TestNoEscape}
+
+- id: SP-01
+  src: "§15.3"
+  ms: 3
+  tier: L4
+  text: "One leecher downloads a multi-file torrent from one seeder through an HTTP tracker, and every file's hash is correct."
+  check: {go: ./tools/swarm, run: TestSinglePeerDownload}
+
+# ───────────────────────── M4 Swarm engine ─────────────────────────
+
+- id: PICK-01
+  src: "§4.1 Piece selection"
+  ms: 4
+  tier: L1
+  text: "Pieces are picked at random until 4 are complete, then rarest-first."
+  check: {go: ./internal/bt/piece, run: TestRandomThenRarest}
+
+- id: PICK-02
+  src: "§4.3, A5"
+  ms: 4
+  tier: L1
+  text: "Picking is strictly by priority class (high>normal>low), rarest-first within a class; a piece's priority is the max over the wanted files it overlaps."
+  check: {go: ./internal/bt/piece, run: TestStrictPriority}
+
+- id: PICK-03
+  src: "§4.3"
+  ms: 4
+  tier: L1
+  text: "Pieces belonging only to skipped files are never requested; priority changes take effect while the torrent is running."
+  check: {go: ./internal/bt/piece, run: TestSkipFiles}
+
+- id: PICK-04
+  src: "§4.1, A5"
+  ms: 4
+  tier: L1
+  text: "Endgame starts once every remaining block has been requested; duplicate blocks are cancelled on arrival and counted as wasted."
+  check: {go: ./internal/bt/piece, run: TestEndgame}
+
+- id: PIPE-01
+  src: "§4.1, D1"
+  ms: 4
+  tier: L1
+  text: "Request queue depth adapts as clamp(rate×2s/16KiB, 5, 250) and respects the peer's reqq."
+  check: {go: ./internal/bt/peer, run: TestAdaptivePipeline}
+
+- id: CHOKE-01
+  src: "§4.1 Choking, T1"
+  ms: 4
+  tier: L1
+  text: "With a fake clock: 4 slots unchoked by rate every 10 s, optimistic unchoke rotates every 30 s, anti-snub after 60 s, seeding mode ranks by upload rate."
+  check: {go: ./internal/bt/choke, run: TestChoker}
+
+- id: BAN-01
+  src: "§4.1, G10, ADR-0006"
+  ms: 4
+  tier: L1
+  text: "Every contributor to a failed piece gets a strike; an IP is banned at 3 strikes; the ban expires after 24 h (fake clock)."
+  check: {go: ./internal/bt/session, run: TestBanPolicy}
+
+- id: RES-01
+  src: "§4.1 Resume, C3"
+  ms: 4
+  tier: L3
+  text: "After a clean restart with unchanged size and mtime, the bitfield is restored with no recheck."
+  check: {go: ./internal/bt/session, run: TestFastResumeClean}
+
+- id: RES-02
+  src: "C3, ADR-0002, §11 reliability"
+  ms: 4
+  tier: L3
+  text: "After an unclean restart, the bitfield is trusted and only sizes are checked; no full recheck; at most 10 s of progress is lost."
+  check: {go: ./internal/bt/session, run: TestFastResumeUnclean}
+
+- id: RES-03
+  src: "C3, ADR-0002"
+  ms: 4
+  tier: L3
+  text: "A bitfield is never persisted before the data of its pieces is fsynced (fault-injecting filesystem)."
+  check: {go: ./internal/bt/storage, run: TestFsyncBeforeBitfield}
+
+- id: RES-04
+  src: "G8, ADR-0004"
+  ms: 4
+  tier: L3
+  text: "If all files are missing and the bitfield is non-empty, the torrent goes to error 'Files missing'; if only some are missing, it rechecks and resumes downloading."
+  check: {go: ./internal/bt/session, run: TestMissingFiles}
+
+- id: LIFE-01
+  src: "C6"
+  ms: 4
+  tier: L3
+  text: "A recheck of a stopped torrent that finds missing pieces leaves it paused, with stop_reason and limit_override cleared."
+  check: {go: ./internal/bt/session, run: TestRecheckStoppedIncomplete}
+
+- id: LIFE-02
+  src: "G22"
+  ms: 4
+  tier: L3
+  text: "completedAt is set on the first time a torrent reaches 100%, including at the initial check; the `completed` announce is sent only when the torrent was downloaded in this session."
+  check: {go: ./internal/bt/session, run: TestCompletionEvent}
+
+- id: LIFE-03
+  src: "§5.2"
+  ms: 4
+  tier: L3
+  text: "Stop seeding from queued(seed) makes no announce and moves the torrent to stopped."
+  check: {go: ./internal/bt/session, run: TestStopSeedingFromQueued}
+
+- id: SWARM-01
+  src: "§13 Swarm"
+  ms: 4
+  tier: L4
+  text: "1 seeder and 3 leechers in-process: all leechers complete with correct hashes, and they upload to each other."
+  check: {go: ./tools/swarm, run: TestSwarmCompletion}
+
+- id: LEAK-01
+  src: "§4.5"
+  ms: 4
+  tier: L1
+  text: "The in-repo goroutine-leak helper passes for every package test suite."
+  check: {script: harness/checks/test-leak.sh}
+
+- id: RACE-01
+  src: "§4.5"
+  ms: 4
+  tier: L1
+  text: "`go test -race ./...` is clean."
+  check: {script: harness/checks/test-race.sh}
+
+# ───────────────────────── M5 Discovery ─────────────────────────
+
+- id: UDP-01
+  src: "§4.1 UDP trackers, D8, T1"
+  ms: 5
+  tier: L3
+  text: "UDP connect, announce and scrape with transaction IDs and connection-ID expiry; retransmits at 15·2ⁿ s (n ≤ 8) when packets are dropped (fake clock)."
+  check: {go: ./internal/bt/tracker, run: TestUDPTracker}
+
+- id: UDP-02
+  src: "§6.2, D8"
+  ms: 5
+  tier: L3
+  text: "At shutdown the `stopped` announce is a single attempt that finishes within the 3 s budget."
+  check: {go: ./internal/bt/tracker, run: TestShutdownAnnounce}
+
+- id: UDPMUX-01
+  src: "§6.1, C5"
+  ms: 5
+  tier: L3
+  text: "There is one UDP socket per address family; KRPC packets and tracker replies are demultiplexed correctly."
+  check: {go: ./internal/bt/session, run: TestUDPDemux}
+
+- id: MT-01
+  src: "§4.1 BEP 12, A4"
+  ms: 5
+  tier: L1
+  text: "Tiers are tried in order, shuffled within each tier, and a responding tracker is promoted to the front of its tier."
+  check: {go: ./internal/bt/tracker, run: TestTiers}
+
+- id: SCR-01
+  src: "§4.1 Scrape, A10"
+  ms: 5
+  tier: L3
+  text: "Scrape runs every 30 min and once after the first announce (HTTP and UDP); the HTTP scrape URL follows the BEP 48 rule, and there is no scrape when it can't be derived."
+  check: {go: ./internal/bt/tracker, run: TestScrape}
+
+- id: DHT-01
+  src: "§4.1 DHT, §13"
+  ms: 5
+  tier: L1
+  text: "The routing table uses k=8 buckets with correct splitting."
+  check: {go: ./internal/bt/dht, run: TestBucketSplitting}
+
+- id: DHT-02
+  src: "§13"
+  ms: 5
+  tier: L3
+  text: "A 50-node in-process DHT network on loopback finds announced peers for an info-hash."
+  check: {go: ./internal/bt/dht, run: TestFiftyNodeNetwork}
+
+- id: DHT-03
+  src: "§4.1, T1"
+  ms: 5
+  tier: L1
+  text: "Tokens rotate every 5 min; tokens from the previous period are still accepted, older ones are rejected (fake clock)."
+  check: {go: ./internal/bt/dht, run: TestTokenRotation}
+
+- id: DHT-04
+  src: "G3"
+  ms: 5
+  tier: L3
+  text: "Node IDs and routing tables persist across restarts; the stored table is discarded if the node ID is missing."
+  check: {go: ./internal/bt/dht, run: TestPersistence}
+
+- id: DHT-05
+  src: "§4.1 IPv6, C5"
+  ms: 5
+  tier: L3
+  text: "IPv4 and IPv6 have separate routing tables, and `nodes6` and `want` are handled."
+  check: {go: ./internal/bt/dht, run: TestIPv6Tables}
+
+- id: DHT-06
+  src: "§11 robustness"
+  ms: 5
+  tier: L2
+  text: "Fuzz: KRPC message handling never panics."
+  check: {fuzz: ./internal/bt/dht, target: FuzzKRPC, time: 30s}
+
+- id: PEX-01
+  src: "§4.1 PEX, D3"
+  ms: 5
+  tier: L3
+  text: "At most one PEX message per minute per peer, at most 50 added and 50 dropped per message, flags honored, added6 supported."
+  check: {go: ./internal/bt/peer, run: TestPEX}
+
+- id: LSD-01
+  src: "§4.1 LSD, D6, T3"
+  ms: 5
+  tier: L3
+  text: "LSD announces and receives over an injectable transport; it is disabled when lsd_enabled=false."
+  check: {go: ./internal/bt/lsd, run: TestLSD}
+
+- id: PRIV-01
+  src: "§4.1 BEP 27, §14.9"
+  ms: 5
+  tier: L4
+  text: "A private torrent uses only its own trackers: no DHT, PEX or LSD traffic for its info-hash."
+  check: {go: ./tools/swarm, run: TestPrivateTrackersOnly}
+
+- id: PRIV-02
+  src: "G15, ADR-0007"
+  ms: 5
+  tier: L3
+  text: "When a magnet resolves to a private torrent, dht/pex/lsd peers are disconnected and DHT/PEX/LSD stop for that torrent."
+  check: {go: ./internal/bt/session, run: TestPrivateMagnetLockdown}
+
+- id: MAG-03
+  src: "§4.1 Magnet, §13, T6"
+  ms: 5
+  tier: L3
+  text: "ut_metadata fetches metadata from a fake peer and verifies it against the info-hash; metadata_size over 10 MiB is rejected."
+  check: {go: ./internal/bt/peer, run: TestUTMetadata}
+
+- id: MAG-04
+  src: "T6"
+  ms: 5
+  tier: L3
+  text: "A bitfield received before the metadata is buffered (≤ 256 KiB) and validated once the metadata arrives."
+  check: {go: ./internal/bt/session, run: TestEarlyBitfield}
+
+- id: EXT-01
+  src: "§4.1 BEP 10, D1, D13"
+  ms: 5
+  tier: L1
+  text: "The extended handshake has m, v ('torrentd 0.1.0'), p, yourip, reqq=250 and metadata_size."
+  check: {go: ./internal/bt/peer, run: TestExtendedHandshake}
+
+# ───────────────────────── M6 Live stats + API ─────────────────────────
+
+- id: API-01
+  src: "§13 API, G12"
+  ms: 6
+  tier: L1
+  text: "Every endpoint in §8.1 is tested with httptest, covering each documented status and error code."
+  check: {go: ./internal/api, run: TestEndpoints}
+
+- id: API-02
+  src: "§8.2"
+  ms: 6
+  tier: L1
+  text: "Add returns 201, 400 invalid_torrent / invalid_magnet / invalid_download_dir, or 409 already_exists with the id and the new trackers merged in."
+  check: {go: ./internal/api, run: TestAddTorrent}
+
+- id: API-03
+  src: "G14"
+  ms: 6
+  tier: L3
+  text: "Adding a .torrent for a magnet still in metadata supplies the metadata and returns 409 with the id."
+  check: {go: ./internal/api, run: TestTorrentFileCompletesMagnet}
+
+- id: API-04
+  src: "G13"
+  ms: 6
+  tier: L1
+  text: "A bulk action returns a result per id, and one failure doesn't stop the others."
+  check: {go: ./internal/api, run: TestBulk}
+
+- id: API-05
+  src: "A9"
+  ms: 6
+  tier: L1
+  text: "PATCH follows merge-patch semantics: missing = unchanged, null = global, -1 = unlimited; an unknown field returns 400 invalid_request."
+  check: {go: ./internal/api, run: TestPatchSemantics}
+
+- id: API-06
+  src: "G9, ADR-0005"
+  ms: 6
+  tier: L3
+  text: "PATCH downloadDir returns 202 and the state becomes moving; moves work on the same and across filesystems; an existing target returns 409 target_exists; actions during moving return 409 invalid_state."
+  check: {go: ./internal/api, run: TestMoveDownloadDir}
+
+- id: API-07
+  src: "A8"
+  ms: 6
+  tier: L3
+  text: "Reannounce before min interval returns 204, and nextAnnounce is set to the earliest allowed time."
+  check: {go: ./internal/api, run: TestReannounceMinInterval}
+
+- id: API-08
+  src: "A11"
+  ms: 6
+  tier: L1
+  text: "/fs/validate reports exists, writable (nearest existing ancestor) and freeBytes; a non-absolute path returns 400."
+  check: {go: ./internal/api, run: TestFSValidate}
+
+- id: API-09
+  src: "G16"
+  ms: 6
+  tier: L3
+  text: "A busy port on PATCH returns 409 port_in_use and keeps the old binding; a busy port at startup still serves the UI and reports the error; --peer-port makes the setting read-only and is not persisted."
+  check: {go: ./internal/api, run: TestListenPort}
+
+- id: API-10
+  src: "G1"
+  ms: 6
+  tier: L3
+  text: "resume on an error torrent moves it to checking."
+  check: {go: ./internal/api, run: TestRetryFromError}
+
+- id: API-11
+  src: "§7.2, G2, G3"
+  ms: 6
+  tier: L1
+  text: "Default settings match §7.2 plus max_half_open=20; internal keys are never returned or accepted."
+  check: {go: ./internal/api, run: TestSettingsDefaults}
+
+- id: API-12
+  src: "G18"
+  ms: 6
+  tier: L1
+  text: "The action-validity matrix (§16.4) returns the specified 204/409 for every state × action pair."
+  check: {go: ./internal/api, run: TestActionValidity}
+
+- id: API-13
+  src: "G20"
+  ms: 6
+  tier: L1
+  text: "Every response in the API test suite validates against spec/openapi.yaml."
+  check: {go: ./internal/api, run: TestOpenAPIConformance}
+
+- id: SSE-01
+  src: "§8.3"
+  ms: 6
+  tier: L3
+  text: "SSE sends a snapshot every 1 s, torrent.added/removed/state/metadata events, and a `: ping` every 15 s."
+  check: {go: ./internal/api, run: TestSSEEvents}
+
+- id: SSE-02
+  src: "C1"
+  ms: 6
+  tier: L1
+  text: "Snapshot entries contain only the dynamic fields listed in §16.7."
+  check: {go: ./internal/api, run: TestSnapshotShape}
+
+- id: STAT-01
+  src: "§5.4, §6"
+  ms: 6
+  tier: L1
+  text: "Rates are payload-only with a 5 s EMA; ratio = uploaded/max(downloaded, completed), or 0 when that is 0; etaSeconds is null unless downloading with rate > 0."
+  check: {go: ./internal/stats, run: TestRates}
+
+- id: STAT-02
+  src: "§6, §7.2"
+  ms: 6
+  tier: L3
+  text: "Data is flushed every 10 s and on shutdown; lifetime counters = value at session start + session delta and are never reset by a restart."
+  check: {go: ./internal/stats, run: TestFlush}
+
+- id: STAT-03
+  src: "G4"
+  ms: 6
+  tier: L3
+  text: "Global lifetime totals persist across restarts and don't decrease when a torrent is removed."
+  check: {go: ./internal/stats, run: TestGlobalTotals}
+
+- id: STAT-04
+  src: "A12, §7.2"
+  ms: 6
+  tier: L1
+  text: "Samples are 10 s averages, rows where both rates are zero are skipped, and samples older than 24 h are purged hourly."
+  check: {go: ./internal/stats, run: TestSamples}
+
+- id: LIM-01
+  src: "§5.2, A6"
+  ms: 6
+  tier: L1
+  text: "Per-torrent limits override global ones, -1 means unlimited, cumulative seedingSeconds is used, and limits are evaluated only in seeding."
+  check: {go: ./internal/stats, run: TestSeedingLimits}
+
+- id: LIM-02
+  src: "C4, ADR-0003"
+  ms: 6
+  tier: L3
+  text: "limit_override suspends both limits; it is cleared only by a PATCH to that torrent's limits, not by global changes."
+  check: {go: ./internal/stats, run: TestLimitOverride}
+
+- id: LIM-03
+  src: "§4.1 Bandwidth, A7"
+  ms: 6
+  tier: L4
+  text: "Global and per-torrent down/up limits are held within ±10% over 30 s, counting peer-wire bytes."
+  check: {go: ./tools/swarm, run: TestBandwidthLimits}
+
+- id: Q-01
+  src: "§4.1 Queueing, G11"
+  ms: 6
+  tier: L3
+  text: "Downloading and metadata torrents use download slots; only one torrent is hash-checked at a time; a completed torrent goes through the seed queue."
+  check: {go: ./internal/bt/session, run: TestQueueing}
+
+- id: Q-02
+  src: "§8.1 queue"
+  ms: 6
+  tier: L1
+  text: "Queue top/up/down/bottom reorder correctly and the change is applied to the active slots."
+  check: {go: ./internal/bt/session, run: TestQueueReorder}
+
+- id: CONN-01
+  src: "§4.1 Connection limits, G2"
+  ms: 6
+  tier: L3
+  text: "Global, per-torrent and half-open connection limits are enforced and can be changed live."
+  check: {go: ./internal/bt/session, run: TestConnectionLimits}
+
+# ───────────────────────── M7 UI ─────────────────────────
+
+- id: UI-01
+  src: "§9.7, A15"
+  ms: 7
+  tier: L1
+  text: "format.ts implements sizes (B…TB, 1024-based, one decimal), rates (<1 KB/s shows 0 KB/s), two-unit durations, and ETA ∞ (rate 0, or over 365 days)."
+  check: {vitest: web/src/lib/format.acceptance.test.ts}
+
+- id: UI-02
+  src: "§9.4, G5"
+  ms: 7
+  tier: L1
+  text: "Table cells render as specified for all 9 states."
+  check: {vitest: web/src/components/TorrentTable.acceptance.test.tsx}
+
+- id: UI-03
+  src: "§9.4, G5, G18"
+  ms: 7
+  tier: L1
+  text: "Row and context-menu actions are shown per state (Pause / Resume / Stop seeding / Resume seeding / Retry), and all are disabled in moving."
+  check: {vitest: web/src/components/RowActions.acceptance.test.tsx}
+
+- id: UI-04
+  src: "A16"
+  ms: 7
+  tier: L1
+  text: "The paste listener opens the dialog only for `magnet:?` text and ignores inputs and textareas."
+  check: {vitest: web/src/components/PasteListener.acceptance.test.tsx}
+
+- id: UI-05
+  src: "§9.3"
+  ms: 7
+  tier: L1
+  text: "Add-dialog flows: file preview with tree and priorities, magnet validation, debounced dir validation, free-space warning, 409 link (with a mock SSE source)."
+  check: {vitest: web/src/components/AddTorrentDialog.acceptance.test.tsx}
+
+- id: UI-06
+  src: "§9.4"
+  ms: 7
+  tier: L6
+  text: "Below 768 px the list switches to a card layout with no horizontal scroll."
+  check: {playwright: e2e/responsive.spec.ts}
+
+- id: UI-07
+  src: "§9.5"
+  ms: 7
+  tier: L6
+  text: "Detail tabs (Overview with piece map and chart, Files, Peers polling every 2 s, Trackers, Options) render and their actions work."
+  check: {playwright: e2e/detail.spec.ts}
+
+- id: UI-08
+  src: "§9.6"
+  ms: 7
+  tier: L6
+  text: "Settings changes apply without a restart; a busy listen port shows an inline error."
+  check: {playwright: e2e/settings.spec.ts}
+
+# ───────────────────────── M8 Hardening ─────────────────────────
+
+- id: FAST-01
+  src: "§4.1 BEP 6, D2"
+  ms: 8
+  tier: L1
+  text: "have_all/have_none are sent; reject_request is used; an allowed_fast set of k=10 is sent to choked peers; received suggest is honored."
+  check: {go: ./internal/bt/peer, run: TestFastExtension}
+
+- id: IPV6-01
+  src: "§4.1 IPv6"
+  ms: 8
+  tier: L3
+  text: "IPv6 peers are accepted from trackers (peers6), PEX (added6) and DHT (nodes6)."
+  check: {go: ./internal/bt/session, run: TestIPv6Peers}
+
+- id: INT-01
+  src: "§11 interop, T4, C2"
+  ms: 8
+  tier: L5
+  text: "qBittorrent-nox ⇄ torrentd in both directions with v1 and hybrid fixtures over plaintext TCP."
+  check: {script: harness/checks/interop-qbittorrent.sh}
+
+- id: INT-02
+  src: "§11 interop, T4"
+  ms: 8
+  tier: L5
+  text: "Transmission ⇄ torrentd in both directions."
+  check: {script: harness/checks/interop-transmission.sh}
+
+- id: INT-03
+  src: "§11 interop"
+  ms: 8
+  tier: L5
+  text: "Announce and scrape work against public HTTP and UDP trackers."
+  check: {manual: "Run docs/manual/public-trackers.md and record the result in runs/"}
+
+- id: NFR-01
+  src: "§11 throughput, ADR-0008"
+  ms: 8
+  tier: L7
+  text: "At least 50 MB/s sustained between two torrentd instances over loopback (2 GiB torrent)."
+  check: {script: harness/checks/bench-loopback.sh}
+
+- id: NFR-02
+  src: "§11 throughput, A13, ADR-0008"
+  ms: 8
+  tier: L7
+  text: "Over a shaped 100 Mbit/s, 30 ms RTT link, the leecher sustains at least 95% of link capacity."
+  check: {script: harness/checks/bench-shaped.sh}
+
+- id: NFR-03
+  src: "§11 scale, A13, ADR-0008"
+  ms: 8
+  tier: L7
+  text: "Idle scenario (200 torrents) uses less than 2% CPU, measured over 60 s after warm-up."
+  check: {script: harness/checks/bench-idle.sh}
+
+- id: NFR-04
+  src: "§11 scale, A13, C7, ADR-0008"
+  ms: 8
+  tier: L7
+  text: "RSS stays under 200 MB with 200 torrents and 500 peer connections over 10 min (max_peers_global=500)."
+  check: {script: harness/checks/bench-rss.sh}
+
+- id: NFR-05
+  src: "§11 scale, C1, ADR-0008"
+  ms: 8
+  tier: L7
+  text: "The SSE stream averages under 100 KB/s with 200 active torrents."
+  check: {script: harness/checks/bench-sse.sh}
+
+- id: NFR-06
+  src: "§11 reliability"
+  ms: 8
+  tier: L7
+  text: "50 iterations of kill -9 during active transfers: PRAGMA integrity_check passes every time, and at most 10 s of counters is lost."
+  check: {script: harness/checks/bench-kill9.sh}
+
+- id: QUAL-01
+  src: "A14, ADR-0009"
+  ms: 1
+  tier: L0
+  text: "Coverage is at least 80% per internal/bt/* package and at least 60% elsewhere (enforced from the milestone that introduces each package)."
+  check: {script: harness/checks/coverage-check.sh}
+
+- id: QUAL-02
+  src: "A14, ADR-0009"
+  ms: 1
+  tier: L0
+  text: "go vet and staticcheck are clean; every exported identifier has a doc comment; no Go file exceeds 800 lines."
+  check: {script: harness/checks/quality-check.sh}

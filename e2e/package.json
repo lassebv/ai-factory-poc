@@ -1,0 +1,11 @@
+{
+  "name": "torrentd-e2e",
+  "private": true,
+  "description": "Playwright end-to-end acceptance tests (verifier-owned). Run via harness/factory gate.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0"
+  }
+}

@@ -1,0 +1,17 @@
+# factory
+/harness/bin/
+/runs/
+/harness/fixtures/torrents/oracle.jsonl
+.claude/settings.local.json
+
+# product
+node_modules/
+/web/dist/*
+!/web/dist/index.html
+/torrentd
+/dist/
+*.test
+coverage.out
+.DS_Store
+/e2e/test-results/
+/e2e/playwright-report/

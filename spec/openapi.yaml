@@ -1,0 +1,823 @@
+openapi: 3.1.0
+info:
+  title: torrentd API
+  version: 0.1.0
+  description: |
+    Authoritative HTTP contract for torrentd (project-description.md §8 as
+    amended by §16.7). Owner: architect role. The backend and frontend develop
+    against this file independently; acceptance tests validate responses
+    against it.
+
+    Conventions:
+    - JSON everywhere (except /healthz, the SPA and SSE). Field names are camelCase.
+    - Timestamps are RFC 3339 strings in UTC.
+    - Rates are bytes/second; sizes are bytes; durations are seconds unless the
+      name says otherwise (seedTimeLimitMin).
+    - Every error uses the Error schema with a code from ErrorCode.
+    - Every request must carry an allowed Host header (403 forbidden_host).
+      State-changing requests with a foreign Origin get 403 forbidden_origin
+      (§16.7 G17). These apply to all operations and are not repeated below.
+    - PATCH bodies use JSON Merge Patch semantics (RFC 7386): absent = unchanged;
+      for limits, null = "use global" and -1 = "unlimited". Unknown fields → 400.
+security: []  # localhost-only, no authentication (§1.2); Host/Origin checks apply instead
+servers:
+  - url: http://127.0.0.1:8080
+
+tags:
+  - name: system
+    description: Health, global statistics and filesystem checks.
+  - name: torrents
+    description: Torrent lifecycle, files, trackers and history.
+  - name: settings
+    description: Global settings, applied live.
+  - name: events
+    description: Server-Sent Events stream.
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      operationId: healthz
+      summary: Liveness probe
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            text/plain:
+              schema: {type: string, const: ok}
+
+  /api/v1/torrents:
+    get:
+      tags: [torrents]
+      operationId: listTorrents
+      summary: List torrents
+      responses:
+        "200":
+          description: All torrents.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Torrent"}
+    post:
+      tags: [torrents]
+      operationId: addTorrent
+      summary: Add from a .torrent file or a magnet URI (§8.2)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              description: Exactly one of `file` or `magnet`.
+              properties:
+                file: {type: string, format: binary, description: ".torrent file, max 10 MiB"}
+                magnet: {type: string}
+                downloadDir: {type: string, description: Absolute path; defaults to default_download_dir}
+                startPaused: {type: boolean, default: false}
+                filePriorities:
+                  type: string
+                  description: JSON array of FilePriority by file idx; only with `file`.
+      responses:
+        "201":
+          description: Added.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Torrent"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409":
+          description: |
+            already_exists — same info-hash present (new trackers merged; if the
+            existing torrent is a magnet still in `metadata`, a supplied file
+            completes its metadata, G14).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AlreadyExists"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+
+  /api/v1/torrents/preview:
+    post:
+      tags: [torrents]
+      operationId: previewTorrent
+      summary: Parse a .torrent without adding it
+      description: |
+        Validates the metainfo exactly as adding would (§4.1, §16.1) but stores
+        nothing. Pad files (BEP 47) are omitted, and `idx` numbers the
+        remaining files from 0 in metainfo order; the same numbering is used
+        everywhere else in the API. `path` is relative to the download dir and
+        includes the torrent name as its first component for multi-file
+        torrents; it is already sanitized (A3).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary, description: ".torrent file, max 10 MiB"}
+      responses:
+        "200":
+          description: Parsed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TorrentPreview"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "413": {$ref: "#/components/responses/PayloadTooLarge"}
+
+  /api/v1/torrents/bulk:
+    post:
+      tags: [torrents]
+      operationId: bulkAction
+      summary: Bulk action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, action]
+              additionalProperties: false
+              properties:
+                ids: {type: array, items: {$ref: "#/components/schemas/TorrentId"}, minItems: 1}
+                action: {type: string, enum: [pause, resume, stop-seeding, recheck, remove]}
+                deleteData: {type: boolean, default: false}
+      responses:
+        "200":
+          description: One result per id; a failure for one id does not stop the others (G13).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items: {$ref: "#/components/schemas/BulkResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+
+  /api/v1/torrents/{id}:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    get:
+      tags: [torrents]
+      operationId: getTorrent
+      summary: Get torrent
+      responses:
+        "200":
+          description: Detail view.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TorrentDetail"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [torrents]
+      operationId: updateTorrent
+      summary: Update torrent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TorrentPatch"}
+      responses:
+        "200":
+          description: Updated (no data move started).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TorrentDetail"}
+        "202":
+          description: A data move started; the torrent is now `moving` (G9).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TorrentDetail"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+    delete:
+      tags: [torrents]
+      operationId: removeTorrent
+      summary: Remove torrent
+      parameters:
+        - name: deleteData
+          in: query
+          schema: {type: boolean, default: false}
+          description: Also delete the torrent's files, .part files, the .parts file and empty directories it created (G21).
+      responses:
+        "204": {description: Removed.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/pause:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: pauseTorrent
+      summary: Pause torrent
+      description: Allowed in metadata, checking, queued, downloading. Complete torrents → 409 invalid_state (use stop-seeding).
+      responses:
+        "204": {description: Paused.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/resume:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: resumeTorrent
+      summary: Resume torrent
+      description: Resume a paused torrent, resume seeding a stopped one, or retry an errored one (→ checking). No-op on active torrents.
+      responses:
+        "204": {description: Resumed (or already active).}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/stop-seeding:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: stopSeeding
+      summary: Stop seeding
+      responses:
+        "204": {description: Stopped (stop_reason = user).}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/recheck:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: recheckTorrent
+      summary: Recheck torrent
+      responses:
+        "204": {description: Recheck started.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/reannounce:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: reannounceTorrent
+      summary: Reannounce torrent
+      description: Announces now, or at the earliest time `min interval` allows (A8).
+      responses:
+        "204": {description: Announce sent or scheduled.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/queue:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: moveInQueue
+      summary: Move in queue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [position]
+              additionalProperties: false
+              properties:
+                position: {type: string, enum: [top, up, down, bottom]}
+      responses:
+        "204": {description: Moved.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/v1/torrents/{id}/files:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    patch:
+      tags: [torrents]
+      operationId: setFilePriorities
+      summary: Set file priorities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                required: [idx, priority]
+                additionalProperties: false
+                properties:
+                  idx: {type: integer, minimum: 0}
+                  priority: {$ref: "#/components/schemas/FilePriority"}
+      responses:
+        "200":
+          description: Updated files.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/TorrentFile"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /api/v1/torrents/{id}/trackers:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    post:
+      tags: [torrents]
+      operationId: addTracker
+      summary: Add tracker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              additionalProperties: false
+              properties:
+                url: {type: string, format: uri}
+                tier: {type: integer, minimum: 0, default: 0}
+      responses:
+        "201":
+          description: Added.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Tracker"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+    delete:
+      tags: [torrents]
+      operationId: removeTracker
+      summary: Remove tracker
+      parameters:
+        - {name: url, in: query, required: true, schema: {type: string}}
+      responses:
+        "204": {description: Removed.}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/v1/torrents/{id}/history:
+    parameters: [{$ref: "#/components/parameters/TorrentId"}]
+    get:
+      tags: [torrents]
+      operationId: getHistory
+      summary: Get history
+      description: 10 s average samples for the last 24 h, oldest first. Missing timestamps mean both rates were 0 (A12).
+      responses:
+        "200":
+          description: Samples.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [intervalSeconds, samples]
+                properties:
+                  intervalSeconds: {type: integer, const: 10}
+                  samples:
+                    type: array
+                    items:
+                      type: object
+                      required: [ts, downloadRate, uploadRate]
+                      properties:
+                        ts: {type: integer, description: Unix seconds at the end of the window}
+                        downloadRate: {type: integer, minimum: 0}
+                        uploadRate: {type: integer, minimum: 0}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/v1/stats:
+    get:
+      tags: [system]
+      operationId: getStats
+      summary: Get stats
+      responses:
+        "200":
+          description: Global statistics.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/GlobalStats"}
+
+  /api/v1/settings:
+    get:
+      tags: [settings]
+      operationId: getSettings
+      summary: Get settings
+      responses:
+        "200":
+          description: Current settings (internal keys are never included).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+    patch:
+      tags: [settings]
+      operationId: updateSettings
+      summary: Update settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SettingsPatch"}
+      responses:
+        "200":
+          description: Updated settings, applied live.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409":
+          description: port_in_use (old binding kept, nothing saved) or invalid_state (listen port locked by --peer-port).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/fs/validate:
+    get:
+      tags: [system]
+      operationId: validatePath
+      summary: Validate path
+      parameters:
+        - {name: path, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Path status (A11).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [exists, writable, freeBytes]
+                properties:
+                  exists: {type: boolean}
+                  writable: {type: boolean, description: "Writable, or creatable in its nearest existing ancestor"}
+                  freeBytes: {type: integer, minimum: 0}
+        "400": {$ref: "#/components/responses/BadRequest"}
+
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: events
+      summary: Server-Sent Events (§8.3, §16.7)
+      description: |
+        Event names and payloads:
+        - `snapshot` (every 1 s): Snapshot
+        - `torrent.added`: Torrent
+        - `torrent.removed`: {"id": TorrentId}
+        - `torrent.state`: StateEvent
+        - `torrent.metadata`: Torrent
+        A `: ping` comment is sent every 15 s.
+      responses:
+        "200":
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema: {type: string}
+
+components:
+  parameters:
+    TorrentId:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/TorrentId"}
+
+  responses:
+    BadRequest:
+      description: invalid_request, invalid_torrent, invalid_magnet or invalid_download_dir.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: not_found.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Conflict:
+      description: invalid_state, not_complete, no_metadata, target_exists or already_exists.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    PayloadTooLarge:
+      description: payload_too_large (uploads over 10 MiB).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+
+  schemas:
+    ErrorCode:
+      type: string
+      enum: [not_found, invalid_request, invalid_state, not_complete, no_metadata, already_exists,
+             invalid_torrent, invalid_magnet, invalid_download_dir, target_exists, port_in_use,
+             payload_too_large, forbidden_origin, forbidden_host, internal]
+
+    Error:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code: {$ref: "#/components/schemas/ErrorCode"}
+            message: {type: string, minLength: 1, description: Human-readable; shown inline in the UI}
+
+    AlreadyExists:
+      type: object
+      required: [error, id]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, const: already_exists}
+            message: {type: string}
+        id: {$ref: "#/components/schemas/TorrentId"}
+
+    TorrentId:
+      type: string
+      pattern: "^[0-9a-f]{40}$"
+      description: v1 info-hash, lowercase hex.
+
+    TorrentState:
+      type: string
+      enum: [metadata, checking, queued, downloading, seeding, stopped, paused, error, moving]
+
+    StopReason:
+      type: [string, "null"]
+      enum: [user, ratio_limit, time_limit, null]
+
+    FilePriority:
+      type: string
+      enum: [skip, low, normal, high]
+
+    TorrentPreview:
+      type: object
+      required: [id, name, private, sizeBytes, pieceLength, pieceCount, files, trackers]
+      additionalProperties: false
+      properties:
+        id: {$ref: "#/components/schemas/TorrentId"}
+        name: {type: string}
+        private: {type: boolean}
+        sizeBytes: {type: integer, minimum: 0, description: Total of all non-pad files}
+        pieceLength: {type: integer}
+        pieceCount: {type: integer}
+        files:
+          type: array
+          items:
+            type: object
+            required: [idx, path, sizeBytes]
+            additionalProperties: false
+            properties:
+              idx: {type: integer, minimum: 0}
+              path: {type: string}
+              sizeBytes: {type: integer, minimum: 0}
+        trackers:
+          type: array
+          description: announce-list tiers in file order (or `announce` as tier 0 when there is no announce-list).
+          items:
+            type: object
+            required: [url, tier]
+            additionalProperties: false
+            properties:
+              url: {type: string}
+              tier: {type: integer, minimum: 0}
+
+    TorrentStats:
+      description: The dynamic fields of a torrent, as sent in every snapshot (C1).
+      type: object
+      required: [id, state, progress, downloadRate, uploadRate, uploadedTotal, downloadedTotal,
+                 wastedTotal, ratio, peersConnected, seedsConnected, seedingSeconds]
+      properties:
+        id: {$ref: "#/components/schemas/TorrentId"}
+        state: {$ref: "#/components/schemas/TorrentState"}
+        stopReason: {$ref: "#/components/schemas/StopReason"}
+        progress: {type: number, minimum: 0, maximum: 1}
+        completedBytes: {type: [integer, "null"], description: null until metadata}
+        checkingProgress: {type: [number, "null"], minimum: 0, maximum: 1}
+        downloadRate: {type: integer, minimum: 0}
+        uploadRate: {type: integer, minimum: 0}
+        uploadedTotal: {type: integer, minimum: 0}
+        downloadedTotal: {type: integer, minimum: 0}
+        wastedTotal: {type: integer, minimum: 0}
+        ratio: {type: number, minimum: 0}
+        peersConnected: {type: integer, minimum: 0}
+        seedsConnected: {type: integer, minimum: 0}
+        etaSeconds: {type: [integer, "null"]}
+        seedingSeconds: {type: integer, minimum: 0}
+
+    Torrent:
+      description: The §5.4 object as amended by §16.5.
+      allOf:
+        - $ref: "#/components/schemas/TorrentStats"
+        - type: object
+          required: [name, private, hasMetadata, sizeBytes, downloadDir, addedAt, downloadLimit, uploadLimit]
+          properties:
+            name: {type: string}
+            private: {type: boolean}
+            hasMetadata: {type: boolean}
+            sizeBytes: {type: [integer, "null"], description: Wanted files only; null until metadata}
+            swarmSeeders: {type: [integer, "null"]}
+            swarmLeechers: {type: [integer, "null"]}
+            downloadDir: {type: string}
+            addedAt: {type: string, format: date-time}
+            completedAt: {type: [string, "null"], format: date-time}
+            ratioLimit: {type: [number, "null"], description: Effective limit}
+            seedTimeLimitMin: {type: [integer, "null"], description: Effective limit}
+            downloadLimit: {type: integer, minimum: 0}
+            uploadLimit: {type: integer, minimum: 0}
+            errorMessage: {type: [string, "null"]}
+
+    TorrentFile:
+      type: object
+      required: [idx, path, sizeBytes, completedBytes, progress, priority]
+      properties:
+        idx: {type: integer, minimum: 0}
+        path: {type: string}
+        sizeBytes: {type: integer, minimum: 0}
+        completedBytes: {type: integer, minimum: 0}
+        progress: {type: number, minimum: 0, maximum: 1}
+        priority: {$ref: "#/components/schemas/FilePriority"}
+
+    Tracker:
+      type: object
+      required: [url, tier, status, userAdded]
+      properties:
+        url: {type: string}
+        tier: {type: integer, minimum: 0}
+        status: {type: string, enum: [not_contacted, updating, working, error]}
+        userAdded: {type: boolean}
+        lastAnnounce: {type: [string, "null"], format: date-time}
+        nextAnnounce: {type: [string, "null"], format: date-time}
+        seeders: {type: [integer, "null"]}
+        leechers: {type: [integer, "null"]}
+        downloaded: {type: [integer, "null"]}
+        message: {type: [string, "null"]}
+
+    Peer:
+      type: object
+      required: [addr, client, progress, downloadRate, uploadRate, source, flags]
+      properties:
+        addr: {type: string, description: "host:port; IPv6 as [addr]:port"}
+        client: {type: string}
+        progress: {type: number, minimum: 0, maximum: 1}
+        downloadRate: {type: integer, minimum: 0}
+        uploadRate: {type: integer, minimum: 0}
+        source: {type: string, enum: [tracker, dht, pex, lsd, incoming, magnet]}
+        flags:
+          type: object
+          required: [choked, interested, peerChoked, peerInterested, snubbed, optimistic, incoming]
+          properties:
+            choked: {type: boolean}
+            interested: {type: boolean}
+            peerChoked: {type: boolean}
+            peerInterested: {type: boolean}
+            snubbed: {type: boolean}
+            optimistic: {type: boolean}
+            incoming: {type: boolean}
+
+    TorrentDetail:
+      allOf:
+        - $ref: "#/components/schemas/Torrent"
+        - type: object
+          required: [files, trackers, peers, pieces, maxPeers, limitOverride, queuePosition, magnetUri]
+          properties:
+            files: {type: array, items: {$ref: "#/components/schemas/TorrentFile"}}
+            trackers: {type: array, items: {$ref: "#/components/schemas/Tracker"}}
+            peers: {type: array, items: {$ref: "#/components/schemas/Peer"}}
+            pieces: {type: string, contentEncoding: base64, description: "Completed-piece bitfield; empty string until metadata"}
+            pieceLength: {type: [integer, "null"]}
+            pieceCount: {type: [integer, "null"]}
+            ratioLimitSetting: {type: [number, "null"], description: "Raw per-torrent value: null = global, -1 = unlimited"}
+            seedTimeLimitSetting: {type: [integer, "null"], description: "Raw per-torrent value in minutes: null = global, -1 = unlimited"}
+            maxPeers: {type: [integer, "null"], description: null = global}
+            limitOverride: {type: boolean}
+            queuePosition: {type: integer, minimum: 0}
+            magnetUri: {type: string}
+
+    TorrentPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        downloadLimit: {type: integer, minimum: 0}
+        uploadLimit: {type: integer, minimum: 0}
+        ratioLimit: {type: [number, "null"], description: "null = global, -1 = unlimited, else >= 0"}
+        seedTimeLimitMin: {type: [integer, "null"], description: "null = global, -1 = unlimited, else >= 0"}
+        maxPeers: {type: [integer, "null"], minimum: 1}
+        downloadDir: {type: string, description: Absolute path; moves data (202) unless the torrent has no metadata}
+
+    BulkResult:
+      oneOf:
+        - type: object
+          required: [id, ok]
+          properties:
+            id: {$ref: "#/components/schemas/TorrentId"}
+            ok: {const: true}
+        - type: object
+          required: [id, ok, error]
+          properties:
+            id: {type: string}
+            ok: {const: false}
+            error: {$ref: "#/components/schemas/Error/properties/error"}
+
+    StateEvent:
+      type: object
+      required: [id, from, to]
+      properties:
+        id: {$ref: "#/components/schemas/TorrentId"}
+        from: {$ref: "#/components/schemas/TorrentState"}
+        to: {$ref: "#/components/schemas/TorrentState"}
+        stopReason: {$ref: "#/components/schemas/StopReason"}
+        errorMessage: {type: [string, "null"]}
+
+    GlobalStats:
+      type: object
+      required: [downloadRate, uploadRate, downloadLimit, uploadLimit, counts, session, lifetime,
+                 dhtNodes, listenPort, bannedPeers]
+      properties:
+        downloadRate: {type: integer, minimum: 0}
+        uploadRate: {type: integer, minimum: 0}
+        downloadLimit: {type: integer, minimum: 0, description: 0 = unlimited}
+        uploadLimit: {type: integer, minimum: 0, description: 0 = unlimited}
+        counts:
+          type: object
+          description: Number of torrents per state.
+          propertyNames: {$ref: "#/components/schemas/TorrentState"}
+          additionalProperties: {type: integer, minimum: 0}
+        session:
+          $ref: "#/components/schemas/Totals"
+        lifetime:
+          $ref: "#/components/schemas/Totals"
+        dhtNodes: {type: integer, minimum: 0}
+        bannedPeers: {type: integer, minimum: 0}
+        freeBytesDefaultDir: {type: [integer, "null"]}
+        listenPort:
+          type: object
+          required: [port, bound, incomingSeen]
+          properties:
+            port: {type: integer}
+            bound: {type: boolean}
+            incomingSeen: {type: boolean, description: An incoming peer connection has been accepted this session}
+            lockedByFlag: {type: boolean, description: Set by --peer-port}
+            error: {type: [string, "null"]}
+
+    Totals:
+      type: object
+      required: [uploaded, downloaded, wasted]
+      properties:
+        uploaded: {type: integer, minimum: 0}
+        downloaded: {type: integer, minimum: 0}
+        wasted: {type: integer, minimum: 0}
+
+    Snapshot:
+      type: object
+      required: [global, torrents]
+      properties:
+        global: {$ref: "#/components/schemas/GlobalStats"}
+        torrents:
+          type: array
+          items: {$ref: "#/components/schemas/TorrentStats"}
+
+    Settings:
+      type: object
+      required: [defaultDownloadDir, listenPort, globalDownloadLimit, globalUploadLimit, maxPeersGlobal,
+                 maxPeersPerTorrent, maxHalfOpen, maxActiveDownloads, maxActiveSeeds, globalRatioLimit,
+                 globalSeedTimeLimit, dhtEnabled, pexEnabled, lsdEnabled, usePartFiles, recentDownloadDirs]
+      additionalProperties: false
+      description: |
+        camelCase view of the §7.2 settings (+ max_half_open, G2). Defaults:
+        ~/Downloads, 42069, 0, 0, 200, 50, 20, 5, 10, null, null, true, true, true, true, [].
+      properties:
+        defaultDownloadDir: {type: string}
+        listenPort: {type: integer, minimum: 0, maximum: 65535}
+        globalDownloadLimit: {type: integer, minimum: 0}
+        globalUploadLimit: {type: integer, minimum: 0}
+        maxPeersGlobal: {type: integer, minimum: 1}
+        maxPeersPerTorrent: {type: integer, minimum: 1}
+        maxHalfOpen: {type: integer, minimum: 1}
+        maxActiveDownloads: {type: integer, minimum: 1}
+        maxActiveSeeds: {type: integer, minimum: 1}
+        globalRatioLimit: {type: [number, "null"], minimum: 0}
+        globalSeedTimeLimit: {type: [integer, "null"], minimum: 0, description: Minutes}
+        dhtEnabled: {type: boolean}
+        pexEnabled: {type: boolean}
+        lsdEnabled: {type: boolean}
+        usePartFiles: {type: boolean}
+        recentDownloadDirs: {type: array, items: {type: string}, maxItems: 10}
+
+    SettingsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        defaultDownloadDir: {type: string}
+        listenPort: {type: integer, minimum: 0, maximum: 65535}
+        globalDownloadLimit: {type: integer, minimum: 0}
+        globalUploadLimit: {type: integer, minimum: 0}
+        maxPeersGlobal: {type: integer, minimum: 1}
+        maxPeersPerTorrent: {type: integer, minimum: 1}
+        maxHalfOpen: {type: integer, minimum: 1}
+        maxActiveDownloads: {type: integer, minimum: 1}
+        maxActiveSeeds: {type: integer, minimum: 1}
+        globalRatioLimit: {type: [number, "null"], minimum: 0}
+        globalSeedTimeLimit: {type: [integer, "null"], minimum: 0}
+        dhtEnabled: {type: boolean}
+        pexEnabled: {type: boolean}
+        lsdEnabled: {type: boolean}
+        usePartFiles: {type: boolean}

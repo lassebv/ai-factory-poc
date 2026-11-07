@@ -1,0 +1,819 @@
+{
+  "libtorrent/absolute_filename.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "path component '/foobar' contains a separator"
+  },
+  "libtorrent/backslash_path.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "path components contain a backslash separator"
+  },
+  "libtorrent/base.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "temp",
+        "sizeBytes": 425
+      }
+    ],
+    "id": "c0fda1edafdbdbb96443424e0b3899af7159d10e",
+    "name": "temp",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 425,
+    "trackers": []
+  },
+  "libtorrent/duplicate_files.torrent": {
+    "accept": false,
+    "rule": "META-03",
+    "why": "two files with the same path"
+  },
+  "libtorrent/empty_path.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "empty path components"
+  },
+  "libtorrent/empty_path_multi.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "empty path components"
+  },
+  "libtorrent/hidden_parent_path.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "component 'foo/../../../bar' contains separators and '..'"
+  },
+  "libtorrent/invalid_file_size.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "file length is not an integer"
+  },
+  "libtorrent/invalid_filename.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "'.' path component and backslash in name"
+  },
+  "libtorrent/invalid_filename2.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "'.' and '/' path components"
+  },
+  "libtorrent/invalid_name.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "name is not a string"
+  },
+  "libtorrent/invalid_piece_len.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "piece length invalid"
+  },
+  "libtorrent/invalid_pieces.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "pieces invalid"
+  },
+  "libtorrent/large_piece_size.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "piece length 536854528 exceeds 256 MiB"
+  },
+  "libtorrent/missing_piece_len.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "piece length missing"
+  },
+  "libtorrent/negative_file_size.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "negative file length"
+  },
+  "libtorrent/negative_piece_len.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "negative piece length"
+  },
+  "libtorrent/no_files.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "no files"
+  },
+  "libtorrent/no_name.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "name is missing"
+  },
+  "libtorrent/pad_file.torrent": {
+    "accept": false,
+    "rule": "BENC-02",
+    "why": "file dict keys are not sorted"
+  },
+  "libtorrent/pad_file_no_path.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "file without a usable path"
+  },
+  "libtorrent/parent_path.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "'..' path components"
+  },
+  "libtorrent/sample.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "sample/text_file2.txt",
+        "sizeBytes": 25
+      },
+      {
+        "idx": 1,
+        "path": "sample/text_file.txt",
+        "sizeBytes": 20
+      }
+    ],
+    "id": "58d8d15a4eb3bd9afabc9cee2564f78192777edb",
+    "name": "sample",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 2,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 45,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "udp://tracker.opentracker.com:80/announce"
+      },
+      {
+        "tier": 1,
+        "url": "tracker.publicbt.com:80/announce"
+      }
+    ]
+  },
+  "libtorrent/single_multi_file.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "temp/foo/bar",
+        "sizeBytes": 425
+      }
+    ],
+    "id": "a385e13b37c5c81d0dc06e7425d352913564771c",
+    "name": "temp",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 425,
+    "trackers": []
+  },
+  "libtorrent/slash_path.torrent": {
+    "accept": false,
+    "rule": "META-02",
+    "why": "path components are '/'"
+  },
+  "libtorrent/string.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "top level is not a dict"
+  },
+  "libtorrent/unaligned_pieces.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "wrong number of piece hashes"
+  },
+  "libtorrent/unordered.torrent": {
+    "accept": false,
+    "rule": "BENC-02",
+    "why": "info dict keys are not sorted"
+  },
+  "libtorrent/v2.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "test64K",
+        "sizeBytes": 65536
+      }
+    ],
+    "id": "c14199bbec64d0e9e439aa3b6b7639e666b86eca",
+    "name": "test64K",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1,
+    "pieceLength": 65536,
+    "private": false,
+    "sizeBytes": 65536,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://example.com/announce"
+      }
+    ]
+  },
+  "libtorrent/v2_hybrid.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "bittorrent-v1-v2-hybrid-test/Darkroom (Stellar, 1994, Amiga ECS) HQ.mp4",
+        "sizeBytes": 6535405
+      },
+      {
+        "idx": 1,
+        "path": "bittorrent-v1-v2-hybrid-test/Spaceballs-StateOfTheArt.avi",
+        "sizeBytes": 20506624
+      },
+      {
+        "idx": 2,
+        "path": "bittorrent-v1-v2-hybrid-test/cncd_fairlight-ceasefire_(all_falls_down)-1080p.mp4",
+        "sizeBytes": 342230630
+      },
+      {
+        "idx": 3,
+        "path": "bittorrent-v1-v2-hybrid-test/eld-dust.mkv",
+        "sizeBytes": 61638604
+      },
+      {
+        "idx": 4,
+        "path": "bittorrent-v1-v2-hybrid-test/fairlight_cncd-agenda_circling_forth-1080p30lq.mp4",
+        "sizeBytes": 277889766
+      },
+      {
+        "idx": 5,
+        "path": "bittorrent-v1-v2-hybrid-test/meet the deadline - Still _ Evoke 2014.mp4",
+        "sizeBytes": 44577773
+      },
+      {
+        "idx": 6,
+        "path": "bittorrent-v1-v2-hybrid-test/readme.txt",
+        "sizeBytes": 61
+      },
+      {
+        "idx": 7,
+        "path": "bittorrent-v1-v2-hybrid-test/tbl-goa.avi",
+        "sizeBytes": 26296320
+      },
+      {
+        "idx": 8,
+        "path": "bittorrent-v1-v2-hybrid-test/tbl-tint.mpg",
+        "sizeBytes": 115869700
+      }
+    ],
+    "id": "514c76c1f27ec61ca8b37851bcd1cbf0b26cf120",
+    "name": "bittorrent-v1-v2-hybrid-test",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1715,
+    "pieceLength": 524288,
+    "private": false,
+    "sizeBytes": 895544883,
+    "trackers": []
+  },
+  "libtorrent/v2_only.torrent": {
+    "accept": false,
+    "rule": "META-08",
+    "why": "v2-only torrent (no v1 pieces)"
+  },
+  "libtorrent/zero.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "zero-length content"
+  },
+  "real/big-buck-bunny.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "Big Buck Bunny/Big Buck Bunny.en.srt",
+        "sizeBytes": 140
+      },
+      {
+        "idx": 1,
+        "path": "Big Buck Bunny/Big Buck Bunny.mp4",
+        "sizeBytes": 276134947
+      },
+      {
+        "idx": 2,
+        "path": "Big Buck Bunny/poster.jpg",
+        "sizeBytes": 310380
+      }
+    ],
+    "id": "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c",
+    "name": "Big Buck Bunny",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1055,
+    "pieceLength": 262144,
+    "private": false,
+    "sizeBytes": 276445467,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "udp://tracker.leechers-paradise.org:6969"
+      },
+      {
+        "tier": 1,
+        "url": "udp://tracker.coppersurfer.tk:6969"
+      },
+      {
+        "tier": 2,
+        "url": "udp://tracker.opentrackr.org:1337"
+      },
+      {
+        "tier": 3,
+        "url": "udp://explodie.org:6969"
+      },
+      {
+        "tier": 4,
+        "url": "udp://tracker.empire-js.us:1337"
+      },
+      {
+        "tier": 5,
+        "url": "wss://tracker.btorrent.xyz"
+      },
+      {
+        "tier": 6,
+        "url": "wss://tracker.openwebtorrent.com"
+      },
+      {
+        "tier": 7,
+        "url": "wss://tracker.fastcast.nz"
+      }
+    ]
+  },
+  "real/cosmos-laundromat.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "Cosmos Laundromat/Cosmos Laundromat.en.srt",
+        "sizeBytes": 3945
+      },
+      {
+        "idx": 1,
+        "path": "Cosmos Laundromat/Cosmos Laundromat.es.srt",
+        "sizeBytes": 3911
+      },
+      {
+        "idx": 2,
+        "path": "Cosmos Laundromat/Cosmos Laundromat.fr.srt",
+        "sizeBytes": 4120
+      },
+      {
+        "idx": 3,
+        "path": "Cosmos Laundromat/Cosmos Laundromat.it.srt",
+        "sizeBytes": 3945
+      },
+      {
+        "idx": 4,
+        "path": "Cosmos Laundromat/Cosmos Laundromat.mp4",
+        "sizeBytes": 220087570
+      },
+      {
+        "idx": 5,
+        "path": "Cosmos Laundromat/poster.jpg",
+        "sizeBytes": 760595
+      }
+    ],
+    "id": "c9e15763f722f23e98a29decdfae341b98d53056",
+    "name": "Cosmos Laundromat",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 843,
+    "pieceLength": 262144,
+    "private": false,
+    "sizeBytes": 220864086,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "udp://tracker.leechers-paradise.org:6969"
+      },
+      {
+        "tier": 1,
+        "url": "udp://tracker.coppersurfer.tk:6969"
+      },
+      {
+        "tier": 2,
+        "url": "udp://tracker.opentrackr.org:1337"
+      },
+      {
+        "tier": 3,
+        "url": "udp://explodie.org:6969"
+      },
+      {
+        "tier": 4,
+        "url": "udp://tracker.empire-js.us:1337"
+      },
+      {
+        "tier": 5,
+        "url": "wss://tracker.btorrent.xyz"
+      },
+      {
+        "tier": 6,
+        "url": "wss://tracker.openwebtorrent.com"
+      },
+      {
+        "tier": 7,
+        "url": "wss://tracker.fastcast.nz"
+      }
+    ]
+  },
+  "real/sintel.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "Sintel/Sintel.de.srt",
+        "sizeBytes": 1652
+      },
+      {
+        "idx": 1,
+        "path": "Sintel/Sintel.en.srt",
+        "sizeBytes": 1514
+      },
+      {
+        "idx": 2,
+        "path": "Sintel/Sintel.es.srt",
+        "sizeBytes": 1554
+      },
+      {
+        "idx": 3,
+        "path": "Sintel/Sintel.fr.srt",
+        "sizeBytes": 1618
+      },
+      {
+        "idx": 4,
+        "path": "Sintel/Sintel.it.srt",
+        "sizeBytes": 1546
+      },
+      {
+        "idx": 5,
+        "path": "Sintel/Sintel.mp4",
+        "sizeBytes": 129241752
+      },
+      {
+        "idx": 6,
+        "path": "Sintel/Sintel.nl.srt",
+        "sizeBytes": 1537
+      },
+      {
+        "idx": 7,
+        "path": "Sintel/Sintel.pl.srt",
+        "sizeBytes": 1536
+      },
+      {
+        "idx": 8,
+        "path": "Sintel/Sintel.pt.srt",
+        "sizeBytes": 1551
+      },
+      {
+        "idx": 9,
+        "path": "Sintel/Sintel.ru.srt",
+        "sizeBytes": 2016
+      },
+      {
+        "idx": 10,
+        "path": "Sintel/poster.jpg",
+        "sizeBytes": 46115
+      }
+    ],
+    "id": "08ada5a7a6183aae1e09d831df6748d566095a10",
+    "name": "Sintel",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 987,
+    "pieceLength": 131072,
+    "private": false,
+    "sizeBytes": 129302391,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "udp://tracker.leechers-paradise.org:6969"
+      },
+      {
+        "tier": 1,
+        "url": "udp://tracker.coppersurfer.tk:6969"
+      },
+      {
+        "tier": 2,
+        "url": "udp://tracker.opentrackr.org:1337"
+      },
+      {
+        "tier": 3,
+        "url": "udp://explodie.org:6969"
+      },
+      {
+        "tier": 4,
+        "url": "udp://tracker.empire-js.us:1337"
+      },
+      {
+        "tier": 5,
+        "url": "wss://tracker.btorrent.xyz"
+      },
+      {
+        "tier": 6,
+        "url": "wss://tracker.openwebtorrent.com"
+      },
+      {
+        "tier": 7,
+        "url": "wss://tracker.fastcast.nz"
+      }
+    ]
+  },
+  "real/ubuntu-24.04.3-live-server-amd64.iso.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "ubuntu-24.04.3-live-server-amd64.iso",
+        "sizeBytes": 3303444480
+      }
+    ],
+    "id": "a1dfefec1a9dd7fa8a041ebeeea271db55126d2f",
+    "name": "ubuntu-24.04.3-live-server-amd64.iso",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 12602,
+    "pieceLength": 262144,
+    "private": false,
+    "sizeBytes": 3303444480,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "https://torrent.ubuntu.com/announce"
+      },
+      {
+        "tier": 1,
+        "url": "https://ipv6.torrent.ubuntu.com/announce"
+      }
+    ]
+  },
+  "synth/duplicate_case.torrent": {
+    "accept": false,
+    "rule": "META-03",
+    "why": "Readme.txt vs README.txt after case-folding"
+  },
+  "synth/duplicate_info_key.torrent": {
+    "accept": false,
+    "rule": "BENC-02",
+    "why": "duplicate key in info dict"
+  },
+  "synth/duplicate_nfc.torrent": {
+    "accept": false,
+    "rule": "META-03",
+    "why": "café.txt NFC vs NFD"
+  },
+  "synth/min_piece_length.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "min.bin",
+        "sizeBytes": 20000
+      }
+    ],
+    "id": "b26dfaa4b532f82a63b92648e7965c79973bb908",
+    "name": "min.bin",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 2,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 20000,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://tracker.example/announce"
+      }
+    ]
+  },
+  "synth/negative_zero.torrent": {
+    "accept": false,
+    "rule": "BENC-02",
+    "why": "i-0e in info dict"
+  },
+  "synth/non_power_of_two_piece.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "np2.bin",
+        "sizeBytes": 100000
+      }
+    ],
+    "id": "a147fc284ec30ac32a4c1fd84b744be5631cc73d",
+    "name": "np2.bin",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 3,
+    "pieceLength": 49152,
+    "private": false,
+    "sizeBytes": 100000,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://tracker.example/announce"
+      }
+    ]
+  },
+  "synth/noncanonical_int.torrent": {
+    "accept": false,
+    "rule": "BENC-02",
+    "why": "i0425e in info dict"
+  },
+  "synth/not_bencode.torrent": {
+    "accept": false,
+    "rule": "META-STRUCT",
+    "why": "not bencode at all"
+  },
+  "synth/piece_length_too_small.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "piece length 8192 < 16 KiB"
+  },
+  "synth/pieces_count_mismatch.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "1 hash for 2 pieces"
+  },
+  "synth/pieces_not_multiple_of_20.torrent": {
+    "accept": false,
+    "rule": "META-06",
+    "why": "len(pieces) = 39"
+  },
+  "synth/private_announce_list.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "private-set/a.bin",
+        "sizeBytes": 40000
+      },
+      {
+        "idx": 1,
+        "path": "private-set/sub/b.bin",
+        "sizeBytes": 1000
+      }
+    ],
+    "id": "6b63670835519d5d55fc62f5b7280f2f8fe195ba",
+    "name": "private-set",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 3,
+    "pieceLength": 16384,
+    "private": true,
+    "sizeBytes": 41000,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://t1a.example/announce"
+      },
+      {
+        "tier": 0,
+        "url": "udp://t1b.example:6969/announce"
+      },
+      {
+        "tier": 1,
+        "url": "http://t2.example/announce"
+      }
+    ]
+  },
+  "synth/unknown_info_keys.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "unknown-keys.bin",
+        "sizeBytes": 30000
+      }
+    ],
+    "id": "c45d866d6ddcb1b1ef28aab44ee6dbc62420c44e",
+    "name": "unknown-keys.bin",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 2,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 30000,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://tracker.example/announce"
+      }
+    ]
+  },
+  "synth/utf8_names.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "Ünïcødé/ä.txt",
+        "sizeBytes": 100
+      }
+    ],
+    "id": "3ca5b6c38c0c2dc7b067fa2ec8097314509f8eed",
+    "name": "Ünïcødé",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 100,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://tracker.example/announce"
+      }
+    ]
+  },
+  "synth/windows_names.torrent": {
+    "accept": true,
+    "files": [
+      {
+        "idx": 0,
+        "path": "win/a_b_c_d_e_f_g_h.txt",
+        "sizeBytes": 10
+      },
+      {
+        "idx": 1,
+        "path": "win/trail_",
+        "sizeBytes": 10
+      },
+      {
+        "idx": 2,
+        "path": "win/space_",
+        "sizeBytes": 10
+      },
+      {
+        "idx": 3,
+        "notReservedFrom": "win/CON",
+        "path": null,
+        "sizeBytes": 10
+      },
+      {
+        "idx": 4,
+        "notReservedFrom": "win/nul.txt",
+        "path": null,
+        "sizeBytes": 10
+      },
+      {
+        "idx": 5,
+        "path": "win/ok.txt",
+        "sizeBytes": 10
+      }
+    ],
+    "id": "efea9a0234c19d3fad0f63977e89cb3f474334f9",
+    "name": "win",
+    "oracles": {
+      "libtorrent": true,
+      "transmission": true
+    },
+    "pieceCount": 1,
+    "pieceLength": 16384,
+    "private": false,
+    "sizeBytes": 60,
+    "trackers": [
+      {
+        "tier": 0,
+        "url": "http://tracker.example/announce"
+      }
+    ]
+  }
+}
