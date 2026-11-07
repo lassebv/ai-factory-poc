@@ -27,6 +27,10 @@ type Options struct {
 	SPA fs.FS
 	// Logger receives request errors and panics. Nil means slog.Default().
 	Logger *slog.Logger
+	// Engine holds the torrents. Nil means no torrents can be added.
+	Engine Engine
+	// DefaultDownloadDir is used when an add request has no downloadDir.
+	DefaultDownloadDir string
 }
 
 // Server is the torrentd HTTP server.
@@ -75,8 +79,16 @@ func New(opts Options) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("/healthz", methodNotAllowed("GET, HEAD"))
+	mux.HandleFunc("GET /api/v1/torrents", s.listTorrents)
+	mux.HandleFunc("POST /api/v1/torrents", s.addTorrent)
+	mux.HandleFunc("/api/v1/torrents", methodNotAllowed("GET, HEAD, POST"))
 	mux.HandleFunc("POST /api/v1/torrents/preview", s.previewTorrent)
-	mux.HandleFunc("/api/v1/torrents/preview", methodNotAllowed("POST"))
+	// A method-less "/api/v1/torrents/preview" would conflict with
+	// "GET /api/v1/torrents/{id}", so GET on preview is its own route and
+	// other methods go through the {id} fallback.
+	mux.HandleFunc("GET /api/v1/torrents/preview", methodNotAllowed("POST"))
+	mux.HandleFunc("GET /api/v1/torrents/{id}", s.getTorrent)
+	mux.HandleFunc("/api/v1/torrents/{id}", torrentMethodNotAllowed)
 	mux.HandleFunc("/api/", notFound)
 	mux.HandleFunc("/", s.static)
 

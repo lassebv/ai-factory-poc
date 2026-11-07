@@ -1,12 +1,13 @@
 // Command torrentd is a single-binary BitTorrent client with a web UI.
 //
-// Milestone 1 wires up the skeleton: configuration (§10), the data directory,
-// SQLite with migrations, and the HTTP server with the embedded SPA. It
-// shuts down gracefully on SIGINT or SIGTERM (§6.2).
+// It wires up configuration (§10), the data directory, SQLite with
+// migrations, the engine session and the HTTP server with the embedded SPA,
+// and shuts down gracefully on SIGINT or SIGTERM (§6.2).
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,12 +16,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
 
 	"torrentd"
 	"torrentd/internal/api"
+	"torrentd/internal/bt/session"
 	"torrentd/internal/clock"
 	"torrentd/internal/config"
 	"torrentd/internal/store"
@@ -81,10 +84,29 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	log.Info("database ready", "path", dbPath, "previous_shutdown_clean", previousClean)
 
-	// §6.1 steps 3 and 4 (session, torrents) arrive with the engine.
-	if cfg.PeerPort != config.PeerPortUnset {
-		log.Debug("peer port configured; the engine is not implemented yet", "peer_port", cfg.PeerPort)
+	// §6.1 step 3: the session binds the peer port. Loading torrents from
+	// the DB (step 4) arrives with persistence in milestone 4.
+	peerPort := cfg.PeerPort
+	if peerPort == config.PeerPortUnset {
+		peerPort = defaultPeerPort
 	}
+	sess, err := session.New(session.Config{PeerPort: peerPort, Clock: clock.Real(), Logger: log})
+	if err != nil {
+		// G16: a busy peer port must not stop the UI from starting.
+		log.Error("peer port unavailable; using a random port instead", "peer_port", peerPort, "err", err)
+		sess, err = session.New(session.Config{PeerPort: 0, Clock: clock.Real(), Logger: log})
+		if err != nil {
+			return err
+		}
+	}
+	sessionClosed := false
+	closeSession := func() {
+		if !sessionClosed {
+			sessionClosed = true
+			sess.Close()
+		}
+	}
+	defer closeSession()
 
 	// §6.1 step 5: HTTP server.
 	l, err := net.Listen("tcp", cfg.Addr)
@@ -100,6 +122,9 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Dev:          cfg.Dev,
 		SPA:          torrentd.WebFS(),
 		Logger:       log,
+		Engine:       sess,
+
+		DefaultDownloadDir: defaultDownloadDir(ctx, st),
 	})
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(l) }()
@@ -126,13 +151,34 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	<-serveErr
 
-	// §6.2 steps 2-4 (announces, flushes, peers) arrive with the engine. The
+	// §6.2 steps 2 and 4: stopped announces (3 s budget), then peers and
+	// files. Flushing state (step 3) arrives with persistence in M4. The
 	// clean-shutdown marker is the last write before closing the DB (C3).
+	closeSession()
 	if err := st.MarkCleanShutdown(context.Background()); err != nil {
 		log.Error("write clean-shutdown marker", "err", err)
 	}
 	log.Info("stopped")
 	return nil
+}
+
+// defaultPeerPort is listen_port's default (§10) when --peer-port is unset.
+const defaultPeerPort = 42069
+
+// defaultDownloadDir is the default_download_dir setting, or
+// ~/Downloads when it is unset.
+func defaultDownloadDir(ctx context.Context, st *store.Store) string {
+	if v, err := st.Setting(ctx, "default_download_dir"); err == nil {
+		var dir string
+		if json.Unmarshal([]byte(v), &dir) == nil && filepath.IsAbs(dir) {
+			return dir
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Downloads")
 }
 
 // isLoopback reports whether addr's host is a loopback address or

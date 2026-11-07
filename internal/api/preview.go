@@ -67,46 +67,75 @@ func NewTorrentPreview(m *metainfo.MetaInfo) TorrentPreview {
 // errTooLarge marks an upload over MaxTorrentFileSize.
 var errTooLarge = errors.New("the .torrent file is larger than 10 MiB")
 
+// maxFieldSize bounds a non-file multipart field.
+const maxFieldSize = 64 << 10
+
+// upload is a parsed multipart/form-data request.
+type upload struct {
+	file    []byte
+	hasFile bool
+	fields  map[string]string
+}
+
 // readTorrentUpload returns the contents of the "file" part of a
 // multipart/form-data request. It writes the error response itself and
 // returns ok=false on failure.
 func readTorrentUpload(w http.ResponseWriter, r *http.Request) (data []byte, ok bool) {
+	u, ok := readUpload(w, r)
+	if !ok {
+		return nil, false
+	}
+	if !u.hasFile {
+		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "missing file part")
+		return nil, false
+	}
+	return u.file, true
+}
+
+// readUpload reads every part of a multipart/form-data request: the "file"
+// part (at most MaxTorrentFileSize) and small text fields. It writes the
+// error response itself and returns ok=false on failure.
+func readUpload(w http.ResponseWriter, r *http.Request) (u upload, ok bool) {
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
 		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "expected a multipart/form-data body with a file part")
-		return nil, false
+		return u, false
 	}
+	u.fields = map[string]string{}
 	body := http.MaxBytesReader(w, r.Body, MaxTorrentFileSize+multipartOverhead)
 	mr := multipart.NewReader(body, params["boundary"])
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
-			WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "missing file part")
-			return nil, false
+			return u, true
 		}
 		if err != nil {
 			uploadError(w, err)
-			return nil, false
+			return u, false
 		}
-		if part.FormName() != "file" {
-			_, err := io.Copy(io.Discard, part)
-			_ = part.Close()
-			if err != nil {
-				uploadError(w, err)
-				return nil, false
-			}
-			continue
+		name := part.FormName()
+		limit := int64(maxFieldSize)
+		if name == "file" {
+			limit = MaxTorrentFileSize
 		}
-		data, err := io.ReadAll(io.LimitReader(part, MaxTorrentFileSize+1))
+		data, err := io.ReadAll(io.LimitReader(part, limit+1))
 		_ = part.Close()
-		if err == nil && len(data) > MaxTorrentFileSize {
-			err = errTooLarge
+		if err == nil && int64(len(data)) > limit {
+			if name == "file" {
+				err = errTooLarge
+			} else {
+				err = errors.New("field " + name + " is too large")
+			}
 		}
 		if err != nil {
 			uploadError(w, err)
-			return nil, false
+			return u, false
 		}
-		return data, true
+		if name == "file" {
+			u.file, u.hasFile = data, true
+		} else if name != "" {
+			u.fields[name] = string(data)
+		}
 	}
 }
 
