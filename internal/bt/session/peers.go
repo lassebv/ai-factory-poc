@@ -36,7 +36,7 @@ type peerState struct {
 	conn         *peer.Conn
 	c            *candidate
 	has          *piece.Bitfield
-	gotMessage   bool
+	gotBitfield  bool
 	amInterested bool
 	choked       bool // the peer is choking us
 	outstanding  map[piece.Block]bool
@@ -170,22 +170,28 @@ func (t *Torrent) onClosed(p *peerState, err error) {
 
 // onMessage applies one message from a connected peer.
 func (t *Torrent) onMessage(p *peerState, m *peer.Message) {
-	first := !p.gotMessage
-	p.gotMessage = true
 	n := t.picker.NumPieces()
 	switch m.ID {
 	case peer.MsgBitfield:
-		if !first {
-			t.drop(p, "bitfield after other messages")
+		// BEP 3 puts the bitfield first, but clients may send extension
+		// messages or haves before it; one bitfield is accepted at any
+		// time and merged with what the peer announced so far.
+		if p.gotBitfield {
+			t.drop(p, "second bitfield")
 			return
 		}
+		p.gotBitfield = true
 		bf, err := piece.FromBytes(m.Payload, n)
 		if err != nil {
 			t.drop(p, "bad bitfield")
 			return
 		}
-		p.has = bf
-		t.picker.AddPeer(bf)
+		for i := 0; i < n; i++ {
+			if bf.Has(i) && !p.has.Has(i) {
+				p.has.Set(i)
+				t.picker.PeerHave(i)
+			}
+		}
 		t.updateInterest(p)
 	case peer.MsgHave:
 		if int64(m.Index) >= int64(n) {

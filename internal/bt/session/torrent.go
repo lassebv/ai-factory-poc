@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/hex"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -394,6 +393,3 @@ func (t *Torrent) shutdownPeers() {
 		p.conn.Close()
 	}
 }
-
-// hexID is the torrent's id.
-func (t *Torrent) hexID() string { return hex.EncodeToString(t.mi.InfoHash[:]) }

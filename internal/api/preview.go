@@ -70,6 +70,9 @@ var errTooLarge = errors.New("the .torrent file is larger than 10 MiB")
 // maxFieldSize bounds a non-file multipart field.
 const maxFieldSize = 64 << 10
 
+// formFields are the multipart parts that are read; others are skipped.
+var formFields = map[string]bool{"file": true, "magnet": true, "downloadDir": true, "startPaused": true, "filePriorities": true}
+
 // upload is a parsed multipart/form-data request.
 type upload struct {
 	file    []byte
@@ -114,6 +117,15 @@ func readUpload(w http.ResponseWriter, r *http.Request) (u upload, ok bool) {
 			return u, false
 		}
 		name := part.FormName()
+		if !formFields[name] {
+			_, err := io.Copy(io.Discard, part)
+			_ = part.Close()
+			if err != nil {
+				uploadError(w, err)
+				return u, false
+			}
+			continue
+		}
 		limit := int64(maxFieldSize)
 		if name == "file" {
 			limit = MaxTorrentFileSize
@@ -133,7 +145,7 @@ func readUpload(w http.ResponseWriter, r *http.Request) (u upload, ok bool) {
 		}
 		if name == "file" {
 			u.file, u.hasFile = data, true
-		} else if name != "" {
+		} else {
 			u.fields[name] = string(data)
 		}
 	}

@@ -134,13 +134,16 @@ func (p *Picker) Interesting(bf *Bitfield) bool {
 // requested.
 func (p *Picker) Pick(bf *Bitfield, n int, outstanding func(Block) bool) []Block {
 	var out []Block
+	picked := map[Block]bool{}
 	take := func(i int, ps *pieceState, endgame bool) {
 		for j := range ps.state {
 			if len(out) >= n {
 				return
 			}
 			s := ps.state[j]
-			if s == blockFree || (endgame && s == blockRequested && !outstanding(p.block(i, j))) {
+			b := p.block(i, j)
+			if s == blockFree || (endgame && s == blockRequested && !picked[b] && !outstanding(b)) {
+				picked[b] = true
 				if s == blockFree {
 					p.free--
 				}
@@ -148,7 +151,7 @@ func (p *Picker) Pick(bf *Bitfield, n int, outstanding func(Block) bool) []Block
 				if ps.reqs[j] < 255 {
 					ps.reqs[j]++
 				}
-				out = append(out, p.block(i, j))
+				out = append(out, b)
 			}
 		}
 	}

@@ -65,6 +65,7 @@ type Response struct {
 // FailureError is a tracker's "failure reason".
 type FailureError struct{ Reason string }
 
+// Error returns the failure reason.
 func (e *FailureError) Error() string { return "tracker failure: " + e.Reason }
 
 // ErrMalformed is returned for a response that isn't a valid announce
