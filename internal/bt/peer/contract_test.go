@@ -527,3 +527,81 @@ func TestContractConnSendQueueLimit(t *testing.T) {
 		t.Fatalf("Err = %v, want ErrSendQueueFull", c.Err())
 	}
 }
+
+// ---- M4 (ADR-0017) ----
+
+func TestContractAcceptHandshake(t *testing.T) {
+	ours := Handshake{InfoHash: ih(5), PeerID: ih('o')}
+	lookup := func(h [20]byte) (Handshake, bool) { return ours, h == ih(5) }
+
+	local, remote := tcpPair(t)
+	theirs := Handshake{InfoHash: ih(5), PeerID: ih('t')}
+	got := make(chan Handshake, 1)
+	go func() {
+		WriteHandshake(remote, theirs)
+		h, _ := ReadHandshake(remote)
+		got <- h
+	}()
+	h, err := AcceptHandshake(context.Background(), local, lookup)
+	if err != nil || h != theirs {
+		t.Fatalf("AcceptHandshake = %+v, %v", h, err)
+	}
+	if r := <-got; r != ours {
+		t.Fatalf("remote read our handshake %+v, want %+v", r, ours)
+	}
+
+	// Refused torrent: nothing is written back.
+	local2, remote2 := tcpPair(t)
+	go WriteHandshake(remote2, Handshake{InfoHash: ih(9)})
+	if _, err := AcceptHandshake(context.Background(), local2, lookup); !errors.Is(err, ErrUnknownTorrent) {
+		t.Fatalf("unknown torrent: %v, want ErrUnknownTorrent", err)
+	}
+	remote2.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if n, _ := remote2.Read(make([]byte, 1)); n != 0 {
+		t.Fatal("a handshake was written for a refused torrent")
+	}
+
+	// A silent remote is bounded by ctx.
+	local3, _ := tcpPair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := AcceptHandshake(ctx, local3, lookup); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("silent remote: err=%v after %s", err, time.Since(start))
+	}
+}
+
+func TestContractConnOnPieceSent(t *testing.T) {
+	local, remote := tcpPair(t)
+	rec := newRecorder()
+	cfg := rec.cfg(nil)
+	type sent struct {
+		index, begin uint32
+		n            int
+	}
+	ch := make(chan sent, 16)
+	cfg.OnPieceSent = func(index, begin uint32, n int) { ch <- sent{index, begin, n} }
+	c := NewConn(local, Handshake{InfoHash: ih(6)}, cfg)
+	defer func() { c.Close(); waitDone(t, c) }()
+	c.Send(Message{ID: MsgHave, Index: 1})
+	c.Send(Message{ID: MsgPiece, Index: 2, Begin: 16384, Block: make([]byte, 1000)})
+	if m := readMsg(t, remote); m.ID != MsgHave {
+		t.Fatalf("got %+v", m)
+	}
+	if m := readMsg(t, remote); m.ID != MsgPiece || len(m.Block) != 1000 {
+		t.Fatalf("got %+v", m)
+	}
+	select {
+	case s := <-ch:
+		if s != (sent{2, 16384, 1000}) {
+			t.Fatalf("OnPieceSent(%+v)", s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnPieceSent not called for a written piece")
+	}
+	select {
+	case s := <-ch:
+		t.Fatalf("OnPieceSent called for a non-piece message: %+v", s)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
