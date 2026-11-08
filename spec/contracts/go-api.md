@@ -105,4 +105,14 @@ func ParseMagnet(uri string) (*Magnet, error)
 
 Package contracts: in Approach C, each package's frozen interface lives in its `contract.go`, which only the architect may edit (ADR-0011).
 
+## Milestone 4 additions (ADR-0016)
+
+| Contract | Detail |
+| --- | --- |
+| Lifecycle | `POST /api/v1/torrents/{id}/pause`, `/resume` and `/stop-seeding` return 204, or 404/409 per G18 (§16.4). `GET …/{id}` reports `stopReason` and `uploadedTotal`. |
+| Seeding from disk | Adding a torrent whose complete data is already in `downloadDir` verifies it (`checking`) and goes to `seeding`. |
+| Incoming peers | The peer port accepts BEP 3 connections for active torrents and serves pieces per the choking algorithm (§4.1). Connections for stopped or paused torrents are refused or closed. |
+| Persistence | Torrents and their state survive restarts on the same `--data-dir` (§6.1 step 4, §7, §16.3). |
+| Tracker peers | Dict peer lists may contain IPv6 literals. Bans are per IP (G10). |
+
 Torrent-file parsing is **not** pinned. It is tested black-box through `POST /api/v1/torrents/preview` (see `spec/openapi.yaml`).

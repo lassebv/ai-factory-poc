@@ -488,137 +488,183 @@
 
 # ───────────────────────── M4 Swarm engine ─────────────────────────
 
+- id: SEED-01
+  src: "§4.1, §5.3, §5.4"
+  ms: 4
+  tier: L3
+  text: "A torrent whose complete data is already in its download dir is verified on add, goes to seeding, serves a leecher byte-for-byte, and counts the upload in uploadedTotal."
+  check: {go: ./acceptance/swarm, module: harness, run: TestSeedToLeecher}
+
+- id: SEED-02
+  src: "§11 interop, §14.10"
+  ms: 4
+  tier: L4
+  text: "A real libtorrent leecher (Docker) downloads a torrent from torrentd, byte-identical."
+  timeout: 10m
+  check: {go: ./acceptance/swarm, module: harness, run: TestSeedToLibtorrent}
+
+- id: SWARM-01
+  src: "§4.1, §15.4"
+  ms: 4
+  tier: L3
+  text: "While downloading from a seeder, torrentd sends HAVE for verified pieces and serves them to a leecher, which completes from torrentd alone."
+  check: {go: ./acceptance/swarm, module: harness, run: TestPassThrough}
+
+- id: CHOKE-01
+  src: "§4.1 Choking"
+  ms: 4
+  tier: L3
+  text: "With 6 interested leechers, at most 4 regular + 1 optimistic are unchoked at once, at least 4 are unchoked, and the optimistic slot rotates so that at least 5 distinct leechers are unchoked within 40 s."
+  timeout: 5m
+  check: {go: ./acceptance/swarm, module: harness, run: TestChokeSlots}
+
 - id: WIRE-03
   src: "T6"
   ms: 4
   tier: L3
-  text: "A request for more than 16 KiB gets reject_request (fast extension) or a disconnect."
-  check: {go: ./internal/bt/peer, run: TestOversizeRequest}
-
-- id: WIRE-06
-  src: "§11, §13"
-  ms: 4
-  tier: L2
-  text: "Fuzz: the wire message decoder never panics."
-  check: {fuzz: ./internal/bt/peer, target: FuzzDecodeMessage, time: 30s}
+  text: "A request for more than 16 KiB gets reject_request (fast extension) or a disconnect within 15 s."
+  check: {go: ./acceptance/swarm, module: harness, run: TestOversizeRequest}
 
 - id: PICK-01
-  src: "§4.1 Piece selection"
-  ms: 4
-  tier: L1
-  text: "Pieces are picked at random until 4 are complete, then rarest-first."
-  check: {go: ./internal/bt/piece, run: TestRandomThenRarest}
-
-- id: PICK-02
-  src: "§4.3, A5"
-  ms: 4
-  tier: L1
-  text: "Picking is strictly by priority class (high>normal>low), rarest-first within a class; a piece's priority is the max over the wanted files it overlaps."
-  check: {go: ./internal/bt/piece, run: TestStrictPriority}
-
-- id: PICK-03
-  src: "§4.3"
-  ms: 4
-  tier: L1
-  text: "Pieces belonging only to skipped files are never requested; priority changes take effect while the torrent is running."
-  check: {go: ./internal/bt/piece, run: TestSkipFiles}
-
-- id: PICK-04
   src: "§4.1, A5"
   ms: 4
-  tier: L1
-  text: "Endgame starts once every remaining block has been requested; duplicate blocks are cancelled on arrival and counted as wasted."
-  check: {go: ./internal/bt/piece, run: TestEndgame}
+  tier: L3
+  text: "Rarest-first: when pieces 24-47 exist only on one peer and 0-23 on three, at least 8 of the first 16 pieces requested from the single holder are rare, and no peer is asked for a piece it does not have."
+  check: {go: ./acceptance/swarm, module: harness, run: TestRarestFirst}
+
+- id: PICK-02
+  src: "§4.1 endgame"
+  ms: 4
+  tier: L3
+  text: "A connected peer that never answers requests for the last pieces does not hang the download (complete within 45 s from another peer), and duplicate requests are cancelled."
+  check: {go: ./acceptance/swarm, module: harness, run: TestEndgame}
 
 - id: PIPE-01
   src: "§4.1, D1"
   ms: 4
-  tier: L1
-  text: "Request queue depth adapts as clamp(rate×2s/16KiB, 5, 250) and respects the peer's reqq."
-  check: {go: ./internal/bt/peer, run: TestAdaptivePipeline}
-
-- id: CHOKE-01
-  src: "§4.1 Choking, T1"
-  ms: 4
-  tier: L1
-  text: "With a fake clock: 4 slots unchoked by rate every 10 s, optimistic unchoke rotates every 30 s, anti-snub after 60 s, seeding mode ranks by upload rate."
-  check: {go: ./internal/bt/choke, run: TestChoker}
+  tier: L3
+  text: "Request pipelining adapts to the rate: a fast peer sees 50-250 outstanding requests."
+  check: {go: ./acceptance/swarm, module: harness, run: TestPipelineAdapts}
 
 - id: BAN-01
   src: "§4.1, G10, ADR-0006"
   ms: 4
-  tier: L1
-  text: "Every contributor to a failed piece gets a strike; an IP is banned at 3 strikes; the ban expires after 24 h (fake clock)."
-  check: {go: ./internal/bt/session, run: TestBanPolicy}
+  tier: L3
+  text: "A peer whose pieces always fail is disconnected and not reconnected to (more than twice), and the download completes from a good peer within 30 s, three times in a row (no intermittent livelock)."
+  timeout: 5m
+  check: {go: ./acceptance/swarm, module: harness, run: TestCorruptPeerBanned}
+
+- id: POISON-01
+  src: "§4.1, §11 robustness"
+  ms: 4
+  tier: L3
+  text: "Unrequested blocks are discarded: a peer flooding unrequested garbage causes no re-downloads (the good peer serves at most 110% of the torrent)."
+  check: {go: ./acceptance/swarm, module: harness, run: TestUnrequestedBlocksIgnored}
+
+- id: CPU-01
+  src: "§11"
+  ms: 4
+  tier: L3
+  text: "Downloading 64 MiB in 4096 pieces from one fast peer uses at most 1.5 s of CPU (regression guard, ~3x the M3 baseline)."
+  check: {go: ./acceptance/swarm, module: harness, run: TestPickerCPU}
 
 - id: RES-01
-  src: "§4.1 Resume, C3"
+  src: "§4.1 fast resume, C3, §7.2"
   ms: 4
   tier: L3
-  text: "After a clean restart with unchanged size and mtime, the bitfield is restored with no recheck."
-  check: {go: ./internal/bt/session, run: TestFastResumeClean}
+  text: "After a clean restart the torrent is listed again, in seeding, with lifetime totals at least what they were."
+  check: {go: ./acceptance/swarm, module: harness, run: TestFastResumeAfterCleanRestart}
 
 - id: RES-02
-  src: "C3, ADR-0002, §11 reliability"
+  src: "§4.1, C3"
   ms: 4
   tier: L3
-  text: "After an unclean restart, the bitfield is trusted and only sizes are checked; no full recheck; at most 10 s of progress is lost."
-  check: {go: ./internal/bt/session, run: TestFastResumeUnclean}
+  text: "With size and mtime unchanged, a clean restart trusts the saved bitfield (no full recheck): a byte changed behind torrentd's back while keeping size and mtime is not detected."
+  check: {go: ./acceptance/swarm, module: harness, run: TestNoRecheckWhenFilesUnchanged}
 
 - id: RES-03
-  src: "C3, ADR-0002"
+  src: "§4.1"
   ms: 4
   tier: L3
-  text: "A bitfield is never persisted before the data of its pieces is fsynced (fault-injecting filesystem)."
-  check: {go: ./internal/bt/storage, run: TestFsyncBeforeBitfield}
+  text: "A changed mtime triggers a recheck: the damaged piece is found and downloaded again, and the data ends up correct."
+  check: {go: ./acceptance/swarm, module: harness, run: TestRecheckWhenFileChanged}
 
 - id: RES-04
+  src: "§4.1, §7.2"
+  ms: 4
+  tier: L3
+  text: "Partial progress survives a restart: pieces verified before the restart are never requested again."
+  check: {go: ./acceptance/swarm, module: harness, run: TestPartialProgressSurvivesRestart}
+
+- id: RES-05
+  src: "§11 reliability, ADR-0002"
+  ms: 4
+  tier: L3
+  text: "kill -9 during a download leaves the DB intact (integrity_check ok), loses at most ~10 s of progress, and the download completes after restart."
+  timeout: 5m
+  check: {go: ./acceptance/swarm, module: harness, run: TestKill9DuringDownload}
+
+- id: RES-06
+  src: "§7.2 desired_state"
+  ms: 4
+  tier: L3
+  text: "A stopped torrent (stopReason user) and a paused torrent keep those states across a restart."
+  check: {go: ./acceptance/swarm, module: harness, run: TestDesiredStatePersists}
+
+- id: RES-07
   src: "G8, ADR-0004"
   ms: 4
   tier: L3
-  text: "If all files are missing and the bitfield is non-empty, the torrent goes to error 'Files missing'; if only some are missing, it rechecks and resumes downloading."
-  check: {go: ./internal/bt/session, run: TestMissingFiles}
+  text: "If all files of a torrent are missing at startup, it goes to error with a \"Files missing\" message."
+  check: {go: ./acceptance/swarm, module: harness, run: TestAllFilesMissing}
 
-- id: LIFE-01
-  src: "C6"
+- id: STOP-01
+  src: "§5.2, §14.6, ADR-0016"
   ms: 4
   tier: L3
-  text: "A recheck of a stopped torrent that finds missing pieces leaves it paused, with stop_reason and limit_override cleared."
-  check: {go: ./internal/bt/session, run: TestRecheckStoppedIncomplete}
+  text: "Stop seeding: state stopped (stopReason user), peer connections closed, no further upload, a stopped announce, files untouched; resume brings it back to seeding and a new leecher completes."
+  check: {go: ./acceptance/swarm, module: harness, run: TestStopAndResumeSeeding}
 
-- id: LIFE-02
-  src: "G22"
+- id: PAUSE-01
+  src: "§5.1, ADR-0016"
   ms: 4
   tier: L3
-  text: "completedAt is set on the first time a torrent reaches 100%, including at the initial check; the `completed` announce is sent only when the torrent was downloaded in this session."
-  check: {go: ./internal/bt/session, run: TestCompletionEvent}
+  text: "Pausing a download stops all requests; resume continues it to completion."
+  check: {go: ./acceptance/swarm, module: harness, run: TestPauseAndResumeDownload}
 
-- id: LIFE-03
-  src: "§5.2"
+- id: LIFE-04
+  src: "G18"
   ms: 4
   tier: L3
-  text: "Stop seeding from queued(seed) makes no announce and moves the torrent to stopped."
-  check: {go: ./internal/bt/session, run: TestStopSeedingFromQueued}
+  text: "Invalid actions are refused: pause on a complete torrent 409 invalid_state, stop-seeding on an incomplete one 409 not_complete, resume on an active one 204, unknown id 404."
+  check: {go: ./acceptance/swarm, module: harness, run: TestActionValidity}
 
-- id: SWARM-01
-  src: "§13 Swarm"
+- id: SHUT-01
+  src: "§16.11, ADR-0015"
   ms: 4
-  tier: L4
-  text: "1 seeder and 3 leechers in-process: all leechers complete with correct hashes, and they upload to each other."
-  check: {go: ./tools/swarm, run: TestSwarmCompletion}
+  tier: L3
+  text: "The stopped announce does not wait for an HTTP request still in flight at SIGTERM (within 3.5 s of the signal)."
+  check: {go: ./acceptance/swarm, module: harness, run: TestStoppedAnnounceWithOpenHTTPRequest}
 
-- id: LEAK-01
-  src: "§4.5"
+- id: MEM-01
+  src: "§11"
   ms: 4
-  tier: L1
-  text: "The in-repo goroutine-leak helper passes for every package test suite."
-  check: {script: harness/checks/test-leak.sh}
+  tier: L3
+  text: "Peak RSS stays under 150 MiB downloading 8 MiB pieces from 16 peers."
+  check: {go: ./acceptance/swarm, module: harness, run: TestMemoryLargePieces}
+
+- id: FD-01
+  src: "§4.5, §11"
+  ms: 4
+  tier: L3
+  text: "After 120 short-lived peer connections, open TCP sockets return to their baseline (+3) within 15 s."
+  check: {go: ./acceptance/swarm, module: harness, run: TestNoLeakedConnections}
 
 - id: RACE-01
   src: "§4.5"
   ms: 4
   tier: L1
-  text: "`go test -race ./...` is clean."
+  text: "The whole product test suite passes under the race detector."
   check: {script: harness/checks/test-race.sh}
 
 # ───────────────────────── M5 Discovery ─────────────────────────

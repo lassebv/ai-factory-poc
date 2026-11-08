@@ -342,3 +342,9 @@ func (i *Instance) Do(t testing.TB, method, path string, body []byte, headers ma
 
 // PID returns the process id.
 func (i *Instance) PID() int { return i.cmd.Process.Pid }
+
+// Kill sends SIGKILL and waits for the process to exit.
+func (i *Instance) Kill() {
+	_ = i.cmd.Process.Signal(syscall.SIGKILL)
+	i.Wait(10 * time.Second)
+}

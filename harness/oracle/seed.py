@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Seed a torrent with libtorrent (the interop oracle for SP-01).
 
-  python3 seed.py <torrent> <save_path> <listen_port>
+  python3 seed.py <torrent> <save_path> <listen_port> [unchoke_slots]
 
 Prints "SEEDING" once the data has been verified, then keeps seeding.
 DHT, LSD, UPnP, NAT-PMP and uTP are off: torrentd only speaks plain TCP at M3.
@@ -12,7 +12,11 @@ import time
 import libtorrent as lt
 
 torrent, save, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
-ses = lt.session({
+extra = {}
+if len(sys.argv) > 4:  # choke-observation validation: N regular slots + 1 optimistic on top
+    extra = {"unchoke_slots_limit": int(sys.argv[4]), "num_optimistic_unchoke_slots": 1,
+             "optimistic_unchoke_interval": 30, "unchoke_interval": 10}
+ses = lt.session({**extra, 
     "listen_interfaces": f"0.0.0.0:{port}",
     "enable_dht": False, "enable_lsd": False, "enable_upnp": False, "enable_natpmp": False,
     "enable_incoming_utp": False, "enable_outgoing_utp": False,
@@ -29,6 +33,9 @@ while True:
     if st.is_seeding and not announced:
         print("SEEDING", flush=True)
         announced = True
+    if extra and announced:
+        unchoked = sum(1 for p in h.get_peer_info() if not (p.flags & lt.peer_info.choked))
+        print("UNCHOKED", unchoked, len(h.get_peer_info()), flush=True)
     if st.errc.value() != 0:
         print("ERROR", st.errc.message(), flush=True)
     for a in ses.pop_alerts():

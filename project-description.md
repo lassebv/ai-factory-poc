@@ -815,3 +815,31 @@ CREATE TABLE global_stats (                            -- [G4] single row
 - **Steps 3 and 4 run last.** Flushing stats, bitfields and the DHT table, then closing peers and files and finally the DB, happen only after both the HTTP shutdown and the announces have finished or timed out.
 - **Total shutdown time** is bounded by roughly max(5 s, 3 s) plus the time to flush.
 - **Verified by** TRK-01 and holdout H12 (`harness/acceptance/holdout/m3`): a `stopped` announce within 3.5 s of SIGTERM while an HTTP request is in flight.
+
+### 16.12 Interpretations Adopted from M1–M3 Implementation Notes (F5)
+
+These clarifications were recorded by implementer agents in `PROGRESS.md`, then reviewed and adopted on 2026-11-08. They are binding.
+
+- **HTTP:**
+  - A known route with an unsupported method → 405 `invalid_request` with `Allow`.
+  - In `--dev` mode, non-API paths → 404 JSON.
+  - A `Host` header without a port means port 80.
+- **Bencode (A1):**
+  - Lenient mode accepts unsorted or duplicate keys (last wins), leading zeros and `-0`. It still rejects empty integers, non-digits, truncation, non-string keys and trailing data.
+  - Integer overflow is an error.
+  - `bool` encodes as `i0e`/`i1e`. `[N]byte` decodes only from an N-byte string.
+- **Metainfo:**
+  - Mistyped top-level `announce`/`announce-list` fields are ignored; only the info dict decides validity.
+  - Tracker tiers keep file order. Blank and duplicate URLs and empty tiers are dropped, and tiers stay contiguous. `announce` is tier 0 only if `announce-list` yields nothing. URLs are not validated.
+  - Zero-length files are allowed. A torrent whose visible total is 0, or whose total overflows, is rejected.
+  - Pad files are validated like any file, count toward piece count and offsets, and are excluded from duplicate detection, `files[]` and `sizeBytes`.
+  - v2-only means "no `pieces` and `meta version` ≥ 2".
+  - The name is validated and sanitized like a path component.
+  - A reserved device stem gets `_` appended (`CON` → `CON_`).
+  - Duplicate detection runs on the sanitized, NFC-normalized, case-folded path.
+- **Uploads:** the `file` part may be at most 10 MiB, and the whole body 1 MiB more. Either limit → 413. A body that isn't multipart, or has no `file` part → 400 `invalid_request`.
+- **Engine defaults:**
+  - Without `--peer-port`, the peer port is the `listen_port` setting, otherwise 42069. A bind failure logs a warning (G16).
+  - Without `downloadDir`, the download dir is `default_download_dir`, otherwise `~/Downloads`.
+  - Blocks that arrive when they aren't wanted count in `downloadedTotal` and `wastedTotal`.
+  - A `magnet` field without a file → 400 `invalid_request` until M5.

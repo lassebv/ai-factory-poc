@@ -17,9 +17,9 @@ set -euo pipefail
 # in-flight responses ("Your computer went to sleep mid-response"). Lid-close
 # sleep can't be prevented this way; keep the lid open (or use clamshell on power).
 AWAKE=(); command -v caffeinate >/dev/null && AWAKE=(caffeinate -ims)
-BASEREF=main; TAG=approach-a
-while [ "${1:-}" = "--base" ] || [ "${1:-}" = "--tag" ]; do
-  case "$1" in --base) BASEREF="$2";; --tag) TAG="$2";; esac; shift 2
+BASEREF=main; TAG=approach-a; ROLE=implementer
+while [ "${1:-}" = "--base" ] || [ "${1:-}" = "--tag" ] || [ "${1:-}" = "--role" ]; do
+  case "$1" in --base) BASEREF="$2";; --tag) TAG="$2";; --role) ROLE="$2";; esac; shift 2
 done
 MS="${1:?usage: run-single-agent.sh [--base REF] [--tag NAME] <milestone> [budget-usd]}"
 BUDGET="${2:-25}"
@@ -43,16 +43,23 @@ git -C "$ROOT" worktree add -q "$WT" -b "$BRANCH" "$BASEREF"
 [ -f "$WT/e2e/package-lock.json" ] && (cd "$WT/e2e" && npm ci --no-audit --no-fund >/dev/null)
 
 mkdir -p "$RUN"
-python3 - "$PROMPTS/single-agent-implementer.md" "$SCOPE" "$MS" "$BRANCH" > "$RUN/prompt.md" <<'EOF'
+python3 - "$PROMPTS/single-agent-implementer.md" "$SCOPE" "$MS" "$BRANCH" "$ROLE" > "$RUN/prompt.md" <<'EOF'
 import sys
-tpl, scope, ms, branch = sys.argv[1:5]
+tpl, scope, ms, branch, role = sys.argv[1:6]
 s = open(tpl).read().replace("{{SCOPE}}", open(scope).read().strip())
-print(s.replace("{{MS}}", ms).replace("{{BRANCH}}", branch), end="")
+s = s.replace("{{MS}}", ms).replace("{{BRANCH}}", branch)
+if role == "architect":
+    s = s.replace("You are the **implementer**", "You are the **single agent** (architect and implementer in one)")
+    s = s.replace("--role implementer", "--role architect")
+    s += ("\n\n## Your role\n\nYou hold the **architect** role as well. You may evolve `contract.go`/`contract_test.go` "
+          "files and add ADRs in `spec/decisions/` (record every contract change in an ADR). "
+          "You still may not edit `spec/acceptance.yaml`, `harness/`, `e2e/` or any `*_acceptance_test.go`.\n")
+print(s, end="")
 EOF
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$RUN/started_at"
 set +e
-(cd "$WT" && FACTORY_ROLE=implementer "${AWAKE[@]}" claude -p "$(cat "$RUN/prompt.md")" \
+(cd "$WT" && FACTORY_ROLE="$ROLE" "${AWAKE[@]}" claude -p "$(cat "$RUN/prompt.md")" \
   --permission-mode auto --output-format stream-json --verbose \
   --max-budget-usd "$BUDGET" -n "approach-a-m$MS" \
   > "$RUN/transcript.jsonl" 2> "$RUN/stderr.log")

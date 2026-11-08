@@ -36,6 +36,10 @@ type PeerOptions struct {
 	HaveNoBitfield bool          // announce pieces with `have` messages instead of a bitfield
 	Bogus          bool          // after unchoke, send pieces nobody asked for (bad index, bad length, unrequested)
 	Poison         bool          // after unchoke, keep sending unrequested full-size garbage blocks for every piece
+
+	// M4 behaviors.
+	Has    []int  // when set, the peer has (and serves) only these pieces
+	Listen string // listen address (default 127.0.0.1:0; e.g. "[::1]:0")
 }
 
 // Handshake is what torrentd sent.
@@ -60,6 +64,7 @@ type PeerStats struct {
 	BadRequests    []string
 	MaxOutstanding int
 	BlocksSent     int
+	Cancels        int // cancel messages received
 	OversizeSent   int
 	ClosedByRemote int // connections torrentd closed (EOF/reset on read)
 }
@@ -80,7 +85,11 @@ type Peer struct {
 
 // NewPeer starts a fake peer on 127.0.0.1.
 func NewPeer(t *torrentgen.Torrent, opts PeerOptions) (*Peer, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	addr := opts.Listen
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -212,8 +221,19 @@ func (p *Peer) serve(c net.Conn) {
 	// Bitfield: we have everything.
 	np := p.t.NumPieces()
 	bf := make([]byte, (np+7)/8)
+	has := make([]bool, np)
 	for i := 0; i < np; i++ {
-		bf[i/8] |= 0x80 >> (i % 8)
+		has[i] = p.opts.Has == nil
+	}
+	for _, i := range p.opts.Has {
+		if i < np {
+			has[i] = true
+		}
+	}
+	for i := 0; i < np; i++ {
+		if has[i] {
+			bf[i/8] |= 0x80 >> (i % 8)
+		}
 	}
 	var wmu sync.Mutex
 	send := func(id byte, payload []byte) error {
@@ -223,6 +243,9 @@ func (p *Peer) serve(c net.Conn) {
 	}
 	if p.opts.HaveNoBitfield {
 		for i := 0; i < np; i++ {
+			if !has[i] {
+				continue
+			}
 			have := make([]byte, 4)
 			binary.BigEndian.PutUint32(have, uint32(i))
 			if err := send(4, have); err != nil {
@@ -420,6 +443,13 @@ func (p *Peer) serve(c net.Conn) {
 				qmu.Lock()
 				cancelled[r] = true
 				qmu.Unlock()
+				p.mu.Lock()
+				p.stats.Cancels++
+				p.mu.Unlock()
+				continue
+			}
+			if int(r.Index) < np && !has[r.Index] {
+				p.bad("request for piece %d, which this peer does not have", r.Index)
 				continue
 			}
 			if int(r.Index) >= np || r.Length == 0 || r.Length > maxBlock ||
