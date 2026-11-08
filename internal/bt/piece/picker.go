@@ -632,8 +632,3 @@ func (s *idxSet) remove(i int) {
 	s.items = s.items[:last]
 	delete(s.pos, i)
 }
-
-func (s *idxSet) has(i int) bool {
-	_, ok := s.pos[i]
-	return ok
-}
