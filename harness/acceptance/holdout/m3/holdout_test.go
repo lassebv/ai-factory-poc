@@ -2,6 +2,7 @@ package m3
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -208,6 +209,39 @@ func TestP02SlowPeerNextToFastPeer(t *testing.T) {
 	t.Logf("METRIC slow_fast_s=%.2f slow_blocks=%d fast_blocks=%d", d.Seconds(), slow.Stats().BlocksSent, fast.Stats().BlocksSent)
 	if d > 30*time.Second {
 		t.Errorf("4 MiB took %s with a fast peer available", d.Round(time.Millisecond))
+	}
+}
+
+// H12: an HTTP request still in flight at SIGTERM (a browser mid-upload; at
+// M6 an SSE stream) must not push the stopped announce past its 3 s budget
+// (§6.2 + TRK-01): announces may not wait for the HTTP drain.
+func TestH12StoppedAnnounceWithOpenHTTPRequest(t *testing.T) {
+	e := newEnv(t)
+	tor := e.gen(t, "inflight.bin", 16384, f(50000))
+	p := e.peer(t, tor, fakes.PeerOptions{})
+	e.tracker.SetPeers(p.Addr())
+	e.download(t, tor, 60*time.Second)
+
+	// Start an upload whose body never finishes.
+	conn, err := net.Dial("tcp", e.inst.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /api/v1/torrents HTTP/1.1\r\nHost: %s\r\nContent-Type: multipart/form-data; boundary=x\r\nContent-Length: 1000000\r\n\r\n--x\r\n", e.inst.Addr)
+	time.Sleep(300 * time.Millisecond)
+
+	sent := time.Now()
+	e.inst.Signal(syscall.SIGTERM)
+	a, ok := e.tracker.WaitFor(8*time.Second, func(a fakes.Announce) bool { return a.Event == "stopped" })
+	must(t, ok, "no stopped announce within 8 s of SIGTERM")
+	d := a.Time.Sub(sent)
+	t.Logf("METRIC stopped_after_s=%.2f", d.Seconds())
+	if d > 3500*time.Millisecond {
+		t.Errorf("stopped announce came %s after SIGTERM: it waited for the HTTP drain (budget 3 s)", d.Round(time.Millisecond))
+	}
+	if code, ok := e.inst.Wait(10 * time.Second); !ok || code != 0 {
+		t.Errorf("exit: code %d, exited %v", code, ok)
 	}
 }
 
