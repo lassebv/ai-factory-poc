@@ -20,5 +20,8 @@ ADRs record decisions that involve a real trade-off and were made by the human o
 | [0013](0013-m3-storage-write-through-and-verify-from-disk.md) | Blocks are written on arrival; pieces are verified from disk | §4.5, D9 | Accepted |
 | [0014](0014-m3-tracker-announce-loop.md) | The tracker package owns the per-torrent announce loop | A4, D7 | Accepted |
 | [0015](0015-m3-torrent-actor-and-shutdown.md) | Torrent actor, published snapshots, shutdown order | §4.5, §6.2 | Accepted |
+| [0017](0017-m4-engine-data-path-pools-and-choking.md) | M4 data path: writes on the read goroutine, process-wide pools, bounded uploads, pure choker | §4.1, §4.5 | Accepted |
+| [0018](0018-m4-picker-ownership-endgame-expiry.md) | M4 picker: block ownership, piece affinity, endgame, request expiry, contributor IPs | §4.1, A5, G10 | Accepted |
+| [0019](0019-m4-persistence-fast-resume-and-lifecycle.md) | M4 persistence: store records, flush protocol, pure resume planner, G18 gaps | §6, §7, C3, G8, G18 | Accepted |
 
 **New ADRs:** number them sequentially, use the same template (Context / Decision / Consequences), and add a row here. The architect role writes them, and the human approves them if they change scope, risk or the API contract.
