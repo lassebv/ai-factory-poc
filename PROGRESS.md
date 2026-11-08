@@ -1,5 +1,10 @@
 # PROGRESS — torrentd
 
+## Status (2026-11-08): milestone 4 (swarm engine), Approach A+
+`harness/factory gate --upto 4`: 79/80. M1 18/18, M2 21/21, M3 15/15, M4 25/26, including SEED-02 against libtorrent in Docker and RACE-01.
+The one gap is AC-06, which is missing: its test package `./tools/swarm` doesn't exist (escalated).
+Coverage: piece 98.3%, choke 95.5%, storage 93.1%, peer 97.9%, session 84.0%, btest 93.9%, store 83.7%, api 93.7%.
+
 ## Milestone 4 (swarm engine), Approach A+ (single implementer on frozen contracts)
 I built the work packages WP1–WP7 from `spec/plans/m4-work-packages.md` in order, each against its frozen contract tests.
 
@@ -46,6 +51,7 @@ I built the work packages WP1–WP7 from `spec/plans/m4-work-packages.md` in ord
 - **Resume from error:** a full recheck. The picker is rebuilt, and every piece overlapping an existing file is hashed.
 - **Restored `paused` + complete:** goes to stopped/user, the same as a StartPaused add over complete data.
 - **Bans:** strikes and bans are process-wide. The ban is persisted in a tracked goroutine, so the actor never blocks on the DB. Other torrents get an `evBanned` event.
+- **LINT-01 at base:** the architect's `internal/bt/btest/btest.go` used `time.Now`/`time.Sleep` directly, which the T1 lint forbids under `internal/bt/**`. It now uses `clock.Real()`.
 - **AC-06:** its test package `./tools/swarm` doesn't exist, and I can't create a counting test. See `escalations/M4-ac06-missing-test-package.md`.
 
 ## Status (2026-11-07): milestone 3 (single-peer download), Approach C
