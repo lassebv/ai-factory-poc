@@ -213,6 +213,13 @@ func (c *conn) writeLoop() {
 		if len(batch) > 0 {
 			c.lastWrite.Store(c.clk.Now().UnixNano())
 		}
+		if c.cfg.OnPieceSent != nil {
+			for _, m := range batch {
+				if !m.KeepAlive && m.ID == MsgPiece {
+					c.cfg.OnPieceSent(m.Index, m.Begin, len(m.Block))
+				}
+			}
+		}
 	}
 }
 
