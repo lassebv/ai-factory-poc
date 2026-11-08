@@ -245,6 +245,63 @@ func TestH12StoppedAnnounceWithOpenHTTPRequest(t *testing.T) {
 	}
 }
 
+// H13 (added after blind review): a peer floods unrequested garbage blocks
+// for every piece while a good peer serves. Only requested blocks may be
+// accepted; otherwise the download can be poisoned indefinitely.
+func TestH13PoisoningPeer(t *testing.T) {
+	e := newEnv(t)
+	tor := e.gen(t, "poison.bin", 32768, f(1<<20))
+	bad := e.peer(t, tor, fakes.PeerOptions{Poison: true})
+	good := e.peer(t, tor, fakes.PeerOptions{Delay: 2 * time.Millisecond})
+	e.tracker.SetPeers(bad.Addr(), good.Addr())
+	e.download(t, tor, 60*time.Second)
+	must(t, bad.Stats().Connections > 0, "scenario did not happen: torrentd never connected to the poisoning peer")
+}
+
+// H14 (added after blind review; endgame is M4 scope): a peer that stays
+// connected but never answers requests for the last pieces must not hang the
+// download when another peer has them.
+func TestH14StalledPeerHoldsLastPieces(t *testing.T) {
+	e := newEnv(t)
+	tor := e.gen(t, "stalled.bin", 32768, f(32*32768))
+	staller := e.peer(t, tor, fakes.PeerOptions{StallFrom: 1}) // never released
+	good := e.peer(t, tor, fakes.PeerOptions{Delay: 20 * time.Millisecond})
+	e.tracker.SetPeers(staller.Addr(), good.Addr())
+	e.download(t, tor, 90*time.Second)
+}
+
+// P03 (added after blind review): peak memory with large pieces and many
+// peers working different pieces. Reports peak RSS; fails above 1 GiB.
+func TestP03MemoryLargePieces(t *testing.T) {
+	e := newEnv(t)
+	tor := e.gen(t, "bigpieces.bin", 8<<20, f(128<<20))
+	var addrs []netip.AddrPort
+	for i := 0; i < 16; i++ {
+		addrs = append(addrs, e.peer(t, tor, fakes.PeerOptions{Delay: 2 * time.Millisecond}).Addr())
+	}
+	e.tracker.SetPeers(addrs...)
+	dir := filepath.Join(t.TempDir(), "d")
+	got := e.mustAdd(t, tor, dir)
+	peak := 0
+	start := time.Now()
+	for e.get(t, got.ID).State != "seeding" {
+		if out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(e.inst.PID())).Output(); err == nil {
+			if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v > peak {
+				peak = v
+			}
+		}
+		must(t, time.Since(start) < 5*time.Minute, "did not finish in 5 min")
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("METRIC large_pieces_peak_rss_mib=%d elapsed_s=%.2f", peak/1024, time.Since(start).Seconds())
+	if err := tor.Verify(dir); err != nil {
+		t.Fatal(err)
+	}
+	if peak > 1<<20 {
+		t.Errorf("peak RSS %d MiB with 8 MiB pieces", peak/1024)
+	}
+}
+
 // P01: loopback throughput from a fast fake peer (§11: ≥ 50 MB/s between two
 // instances). Reports MB/s, peak RSS and CPU time; fails below 25 MB/s.
 func TestP01Throughput(t *testing.T) {

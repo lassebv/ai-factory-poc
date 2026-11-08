@@ -35,6 +35,7 @@ type PeerOptions struct {
 	ChokeFor       time.Duration // ...for this long, then unchoke
 	HaveNoBitfield bool          // announce pieces with `have` messages instead of a bitfield
 	Bogus          bool          // after unchoke, send pieces nobody asked for (bad index, bad length, unrequested)
+	Poison         bool          // after unchoke, keep sending unrequested full-size garbage blocks for every piece
 }
 
 // Handshake is what torrentd sent.
@@ -377,6 +378,26 @@ func (p *Peer) serve(c net.Conn) {
 		switch msg[0] {
 		case 2: // interested
 			send(1, nil) // unchoke
+			if p.opts.Poison {
+				go func() {
+					junk := make([]byte, 8+maxBlock)
+					for round := 0; ; round++ {
+						for i := 0; i < np; i++ {
+							for off := int64(0); off < p.t.PieceSize(i); off += maxBlock {
+								n := min(int64(maxBlock), p.t.PieceSize(i)-off)
+								pl := junk[:8+n]
+								binary.BigEndian.PutUint32(pl, uint32(i))
+								binary.BigEndian.PutUint32(pl[4:], uint32(off))
+								pl[8] = byte(round + 1)
+								if send(7, pl) != nil {
+									return
+								}
+								time.Sleep(time.Millisecond)
+							}
+						}
+					}
+				}()
+			}
 			if p.opts.Bogus {
 				bogus := func(index, begin uint32, n int) {
 					pl := make([]byte, 8+n)
