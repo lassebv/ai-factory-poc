@@ -60,7 +60,7 @@ func TestDefaultDownloadDir(t *testing.T) {
 }
 
 func TestStartEngine(t *testing.T) {
-	sess, err := startEngine(context.Background(), config.Config{PeerPort: 0}, fakeSettings{}, quietLog)
+	sess, err := startEngine(context.Background(), config.Config{PeerPort: 0}, fakeSettings{}, nil, false, quietLog)
 	if err != nil {
 		t.Fatal(err)
 	}

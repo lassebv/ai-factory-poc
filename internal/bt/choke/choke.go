@@ -10,11 +10,11 @@ import (
 
 // choker implements Choker.
 type choker struct {
-	rnd        *rand.Rand
-	regular    []piece.PeerKey
-	opt        piece.PeerKey
-	hasOpt     bool
-	optChosen  time.Time
+	rnd       *rand.Rand
+	regular   []piece.PeerKey
+	opt       piece.PeerKey
+	hasOpt    bool
+	optChosen time.Time
 }
 
 func newChoker(rnd *rand.Rand) Choker {

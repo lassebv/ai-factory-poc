@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -11,7 +12,7 @@ import (
 	"torrentd/internal/bt/session"
 )
 
-// routeTorrents registers the M3 torrent routes (see contract.go).
+// routeTorrents registers the M3 and M4 torrent routes (see contract.go).
 func (s *Server) routeTorrents(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/torrents/preview", s.previewTorrent)
 	mux.HandleFunc("GET /api/v1/torrents/preview", methodNotAllowed("POST"))
@@ -26,6 +27,43 @@ func (s *Server) routeTorrents(mux *http.ServeMux) {
 		}
 		methodNotAllowed("GET")(w, r)
 	})
+	for name, act := range map[string]func(TorrentService) func(context.Context, [20]byte) error{
+		"pause":        func(t TorrentService) func(context.Context, [20]byte) error { return t.Pause },
+		"resume":       func(t TorrentService) func(context.Context, [20]byte) error { return t.Resume },
+		"stop-seeding": func(t TorrentService) func(context.Context, [20]byte) error { return t.StopSeeding },
+	} {
+		mux.HandleFunc("POST /api/v1/torrents/{id}/"+name, s.lifecycle(act))
+		mux.HandleFunc("/api/v1/torrents/{id}/"+name, methodNotAllowed("POST"))
+	}
+}
+
+// lifecycle handles POST /api/v1/torrents/{id}/{pause,resume,stop-seeding}.
+func (s *Server) lifecycle(act func(TorrentService) func(context.Context, [20]byte) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		svc, ok := s.torrents(w)
+		if !ok {
+			return
+		}
+		id, ok := parseTorrentID(r.PathValue("id"))
+		if !ok {
+			WriteError(w, http.StatusNotFound, CodeNotFound, "no such torrent")
+			return
+		}
+		err := act(svc)(r.Context(), id)
+		switch {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, session.ErrNotFound):
+			WriteError(w, http.StatusNotFound, CodeNotFound, "no such torrent")
+		case errors.Is(err, session.ErrInvalidState):
+			WriteError(w, http.StatusConflict, CodeInvalidState, "this action is not valid in the torrent's current state")
+		case errors.Is(err, session.ErrNotComplete):
+			WriteError(w, http.StatusConflict, CodeNotComplete, "the torrent is not complete")
+		default:
+			s.log.Error("torrent action", "path", r.URL.Path, "err", err)
+			WriteError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+		}
+	}
 }
 
 // torrents returns the TorrentService or writes a 500.
@@ -171,8 +209,12 @@ func NewTorrent(st session.Status) Torrent {
 		t.ErrorMessage = &msg
 	}
 	if st.State == session.StateChecking {
-		p := 0.0
+		p := min(max(st.CheckingProgress, 0), 1)
 		t.CheckingProgress = &p
+	}
+	if st.State == session.StateStopped && st.StopReason != session.StopReasonNone {
+		r := string(st.StopReason)
+		t.StopReason = &r
 	}
 	return t
 }
