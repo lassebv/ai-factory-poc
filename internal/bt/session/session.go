@@ -393,6 +393,9 @@ func (s *session) action(ctx context.Context, id [20]byte, kind actionKind) erro
 	if !ok {
 		return ErrNotFound
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	reply := make(chan error, 1)
 	select {
 	case t.actions <- evAction{kind: kind, reply: reply}:

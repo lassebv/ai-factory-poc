@@ -332,16 +332,14 @@ func (t *torrent) tick() {
 		return
 	}
 	if t.state == StateDownloading && t.picker != nil {
-		touched := map[piece.PeerKey]bool{}
 		for _, e := range t.picker.Expire() {
 			if p := t.peers[e.Peer]; p != nil {
+				delete(p.reqs, e.Block)
 				_ = p.conn.Send(peer.Message{ID: peer.MsgCancel, Index: e.Block.Index, Begin: e.Block.Begin, Length: e.Block.Length})
 			}
-			touched[e.Peer] = true
 		}
-		if len(touched) > 0 {
-			t.fillAll()
-		}
+		// Also tops up pipelines whose requests went stale (see fill).
+		t.fillAll()
 	}
 	if t.ticks%int(choke.RechokeInterval/time.Second) == 0 {
 		t.rechoke(false)
@@ -465,6 +463,7 @@ func (t *torrent) deactivate() {
 		t.removePeer(key)
 	}
 	t.queue = nil
+	clear(t.backoff) // we closed them ourselves: redial at once on resume
 }
 
 func (t *torrent) startTracker() {

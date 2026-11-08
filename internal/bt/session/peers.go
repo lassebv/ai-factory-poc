@@ -32,6 +32,13 @@ type peerState struct {
 
 	reply chan bool // block decisions for the read goroutine
 
+	// reqs mirrors our requests outstanding at the peer with their send
+	// time; lat is the peer's smoothed request latency. Requests far older
+	// than lat are stale (a peer that never answers some pieces) and do not
+	// count against the pipeline depth (see fill).
+	reqs map[piece.Block]time.Time
+	lat  time.Duration
+
 	uploads  []piece.Block    // queued requests from the peer
 	readCh   chan piece.Block // to the upload helper
 	inflight atomic.Int32     // blocks handed to the helper, not yet sent
@@ -152,7 +159,7 @@ func (t *torrent) connected(ev evHandshaken) {
 		bf:     piece.NewBitfield(t.layout.NumPieces),
 		choked: true, amChoking: true,
 		down: choke.NewMeter(t.s.clk), up: choke.NewMeter(t.s.clk),
-		since: now, reply: make(chan bool, 1),
+		since: now, reply: make(chan bool, 1), reqs: map[piece.Block]time.Time{},
 		readCh: make(chan piece.Block, UploadReadAhead),
 	}
 	st := t.store
@@ -296,6 +303,7 @@ func (t *torrent) message(key piece.PeerKey, m peer.Message) {
 		t.fill(p)
 	case peer.MsgChoke:
 		p.choked = true
+		clear(p.reqs)
 		t.picker.Release(key)
 		t.fillAll()
 	case peer.MsgInterested:
@@ -352,6 +360,15 @@ func (t *torrent) block(key piece.PeerKey, m peer.Message) bool {
 	}
 	p.down.Add(n)
 	b := piece.Block{Index: m.Index, Begin: m.Begin, Length: uint32(len(m.Block))}
+	if at, ok := p.reqs[b]; ok {
+		sample := t.s.clk.Now().Sub(at)
+		if p.lat == 0 {
+			p.lat = sample
+		} else {
+			p.lat = (7*p.lat + sample) / 8
+		}
+		delete(p.reqs, b)
+	}
 	rc := t.picker.Received(key, b)
 	if !rc.Accepted {
 		t.wasted.Add(n)
@@ -366,6 +383,7 @@ func (t *torrent) block(key piece.PeerKey, m peer.Message) bool {
 	}
 	for _, c := range rc.Cancel {
 		if cp := t.peers[c]; cp != nil {
+			delete(cp.reqs, b)
 			_ = cp.conn.Send(peer.Message{ID: peer.MsgCancel, Index: b.Index, Begin: b.Begin, Length: b.Length})
 			t.fill(cp)
 		}
@@ -386,15 +404,42 @@ func (t *torrent) fill(p *peerState) {
 	if p.choked || t.state != StateDownloading || t.picker == nil {
 		return
 	}
-	want := piece.PipelineDepth(p.down.Rate()) - t.picker.Outstanding(p.key)
+	depth := piece.PipelineDepth(p.down.Rate())
+	out := t.picker.Outstanding(p.key)
+	live := out
+	if out >= depth {
+		live = out - t.stale(p)
+	}
+	want := min(depth-live, piece.MaxPipelineDepth-out)
 	if want <= 0 {
 		return
 	}
+	now := t.s.clk.Now()
 	for _, b := range t.picker.Pick(p.key, want) {
+		p.reqs[b] = now
 		if err := p.conn.Send(peer.Message{ID: peer.MsgRequest, Index: b.Index, Begin: b.Begin, Length: b.Length}); err != nil {
 			return
 		}
 	}
+}
+
+// Stale-request detection (see peerState.reqs).
+const (
+	minStaleAge   = time.Second
+	staleLatencyX = 4
+)
+
+// stale counts p's requests outstanding for much longer than its latency.
+func (t *torrent) stale(p *peerState) int {
+	age := max(minStaleAge, staleLatencyX*p.lat)
+	cut := t.s.clk.Now().Add(-age)
+	n := 0
+	for _, at := range p.reqs {
+		if at.Before(cut) {
+			n++
+		}
+	}
+	return n
 }
 
 // rechoke re-evaluates (or, with fill, tops up) the unchoke set.
