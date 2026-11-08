@@ -169,6 +169,39 @@ interfaces + fakes     ├─▶ piece picker agent ──────┤   swar
 - **Weaknesses:** Integration hell if the contracts are underspecified. This hits hardest at `session`, the orchestrator where concurrency bugs live. Agents may each solve shared problems (rate limiting, logging, error types) in their own way.
 - **Mitigations:** Make a "shared kernel" package, written first, that holds common types and errors. Add contract tests that every implementation of an interface must pass. Have the integrator own `session` and nothing else.
 
+### Approach A+ — "Architect first, then a single implementer"
+
+**Shape:** Approach C's architect phase, followed by Approach A's single implementer. An architect freezes the contracts (`contract.go`, `contract_test.go`), records the design decisions as ADRs, and reviews the milestone for risks in the spec and harness. Then **one** implementer builds every package and the integration against those contracts.
+
+```
+spec + harness ──▶ Architect ──────────────────────▶ Single implementer ──▶ gate
+                   (contracts, contract tests,        (all packages +
+                    ADRs, risk review, escalations)    integration, can't edit
+                                                       contract files)
+```
+
+- **Why try it:** In the controlled M3 comparison ([`retros/2026-11-08-a-vs-c-m3/`](retros/2026-11-08-a-vs-c-m3/README.md)), C's quality lead came from the **architect**, not from the parallel fan-out:
+  - contracts and contract tests explained the design and test-quality gap (blind reviews rated design 8.0 vs 6.25 and tests 8.25 vs 6.0);
+  - the up-front risk review caught a spec contradiction and a harness flaw before any code existed.
+
+  The fan-out saved little time on M3, and all the extra sessions added orchestration overhead and more ways to fail. A+ tests whether the architect alone captures C's quality at roughly A's cost.
+- **Fit for `torrentd`:** Good for multi-package, concurrency-heavy milestones where the design risk is high but each package is small. M4 (the swarm engine) and M5 (discovery) are examples. For small, pure-logic milestones, plain A is cheaper.
+- **Strengths:**
+  - Keeps the frozen contracts and contract tests, so the design is explicit and the tests are strong.
+  - Decisions are recorded as ADRs, and risks are found early.
+  - There's no integration phase and no merges between agents.
+  - There are only 2 sessions, so cost and operational exposure stay close to A.
+- **Weaknesses:**
+  - Wall-clock time is serial: architect, then implementer.
+  - The implementer's context has to hold every package.
+  - Frozen contracts make bad decisions as sticky as good ones. On M3, C's ADR-0012 froze "no endgame", which made the H14 hang structural.
+- **Mitigations:**
+  - The architect's risk review should explicitly consider robustness scenarios: corrupt, stalled and slow peers, and shutdown under load.
+  - Let the implementer propose a contract change through an escalation, with a fast architect turnaround, instead of working around a bad contract.
+  - Run fresh holdout tests and a blind review at the end, as in the M3 comparison.
+- **Experiment:** Run A+ on M4, then compare cost, time, hidden-test results and blind-review scores against the M3 baselines for A and C.
+- **How to run:** `harness/prompts/run-fanout.sh` covers the architect phase. A single-implementer phase that reads the architect's plan is still to be added (`run-aplus.sh`).
+
 ### Approach D — "Adversarial / red-team harness"
 
 **Shape:** Builders on one side. On the other side are attacker agents whose only job is to make the system fail. They write malformed-peer fakes, hostile trackers, path-traversal torrents, DHT floods and kill-9 tests.
@@ -222,6 +255,7 @@ Builder agents ──▶ code ◀── Red-team agents (fuzzers, malicious peer
 | Approach | Parallelism | Up-front harness effort | Orchestration complexity | Human involvement | Best for learning… |
 | --- | --- | --- | --- | --- | --- |
 | A Single agent | Low | High | Low | Low–medium | How far the harness alone gets you |
+| A+ Architect + single agent | Low | High (contracts too) | Low–medium | Low | Whether up-front contracts and risk review capture C's quality without the fan-out |
 | B Assembly line | Medium | High | Medium | Low | Which roles add value |
 | C Contract fan-out | High | High (contracts too) | Medium | Medium at integration | How good your decomposition and contracts are |
 | D Red team | Medium | Grows the harness itself | Low–medium | Low | Robustness and harness growth |
@@ -294,6 +328,8 @@ Run **Approach A** on milestones 1–2. Record the metrics. Then delete the code
 
 ### Phase 2 — Scale to the engine core
 Milestones 3–4 (single-peer download, then the swarm engine). Use **Approach C** (fan-out by package) with the L4 swarm harness as the integration gate. Add **Approach F** for the piece picker and choker. Expect the session/concurrency integration to be the hard part. That is the point of this phase.
+
+*Status (2026-11-08):* M3 was run with both A and C ([comparison](retros/2026-11-08-a-vs-c-m3/README.md)). C produced better quality at 2.1× A's cost, and that quality came from the architect. M4 will therefore be run with **A+**.
 
 ### Phase 3 — Autonomy
 Milestones 5–7 (discovery, API, UI). Move to **Approach E** (orchestrator + backlog). Add **Approach D** (red team) as a background loop against parsers and peers. Frontend and backend develop in parallel against the OpenAPI contract.

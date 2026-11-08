@@ -246,6 +246,8 @@ If a file priority changes from `skip` to wanted, a `seeding` or `stopped` torre
 
 ### 6.2 Shutdown (SIGINT/SIGTERM)
 
+> **Amended by §16.11:** steps 1 and 2 start at the same time.
+
 1. Graceful HTTP shutdown (5 s).
 2. Send `stopped` announces to trackers, in parallel, with a 3 s timeout.
 3. Flush stats, bitfields, and the DHT routing table to the DB.
@@ -805,3 +807,11 @@ CREATE TABLE global_stats (                            -- [G4] single row
   - Dev tools run via `go run pkg@version` or as installed binaries, never through a `tool` directive in `go.mod`.
   - `tools/depcheck` derives the allowlist from `go mod graph`: stdlib, `golang.org/x/*`, `modernc.org/*` and modules reachable only through `modernc.org/sqlite`.
   - It also checks an explicit denylist of known BitTorrent modules.
+
+### 16.11 Shutdown Order (amends §6.2)
+
+- **[F12, ADR-0015] Concurrent start.** On SIGINT/SIGTERM, the graceful HTTP shutdown (§6.2 step 1, up to 5 s) and the `stopped` announces (§6.2 step 2, in parallel, 3 s timeout) **start at the same time**.
+- **The budget is measured from the signal.** The 3-second announce budget starts at the signal, so an in-flight HTTP request or a long-lived SSE stream can never delay the `stopped` announces.
+- **Steps 3 and 4 run last.** Flushing stats, bitfields and the DHT table, then closing peers and files and finally the DB, happen only after both the HTTP shutdown and the announces have finished or timed out.
+- **Total shutdown time** is bounded by roughly max(5 s, 3 s) plus the time to flush.
+- **Verified by** TRK-01 and holdout H12 (`harness/acceptance/holdout/m3`): a `stopped` announce within 3.5 s of SIGTERM while an HTTP request is in flight.

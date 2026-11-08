@@ -67,7 +67,7 @@ The per-agent prompts and final reports are in the subdirectories, and the metri
 
 **F11: the WIRE-04 text was out of date.** It said "200 peers" but the test uses 40. The text is fixed.
 
-**F12 (open, human):** amend §6.2 to say the `stopped` announces start at the same time as the HTTP drain.
+**F12 (resolved 2026-11-08):** §6.2 is amended by §16.11. The `stopped` announces start at the same time as the HTTP drain.
 
 **F5 (still open, from M2):** promote or reject the interpretations recorded in `PROGRESS.md` at each milestone boundary.
 

@@ -1,6 +1,6 @@
 # ADR-0015: Torrent actor, published snapshots, and shutdown order at M3
 
-- **Status:** Accepted (2026-11-07, architect, Approach C run on M3)
+- **Status:** Accepted (2026-11-07, architect, Approach C run on M3). The shutdown order (decision 3) was **confirmed by the human on 2026-11-08** and made normative in `project-description.md` §16.11.
 - **Spec:** §4.5, §5, §6.1, §6.2, §16.7 G16 · **Acceptance:** ADD-01, TRK-01, SP-01
 
 ## Context

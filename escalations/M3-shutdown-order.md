@@ -16,3 +16,6 @@
 
 ## What I did meanwhile
 ADR-0015 §3 records option 1. Steps 3 and 4 (flushes, then closing the DB) still run last, as §6.2 says. The human should confirm, or amend §6.2.
+
+## Resolution (human, 2026-11-08)
+Option 1 is confirmed. It's normative in `project-description.md` §16.11, with a pointer at §6.2, and ADR-0015's status is updated. Holdout H12 verifies it: A, which followed §6.2 literally, sent its `stopped` announce 5.0 s after SIGTERM with an HTTP request in flight; C sent it at 0.0 s.
