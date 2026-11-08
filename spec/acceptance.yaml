@@ -76,9 +76,9 @@
 - id: AC-06
   src: "§14.6, §5.2"
   ms: 4
-  tier: L4
-  text: "Stop seeding: no further upload bytes, a `stopped` announce reaches the tracker, files are kept; Resume seeding brings it back to Seeding."
-  check: {go: ./tools/swarm, run: TestStopSeeding}
+  tier: L3
+  text: "Stop seeding: no further upload bytes, a `stopped` announce reaches the tracker, files are kept; Resume seeding brings it back to Seeding (same scenario as STOP-01)."
+  check: {go: ./acceptance/swarm, module: harness, run: TestStopAndResumeSeeding}
 
 - id: AC-06-UI
   src: "§14.6, §13 E2E"
@@ -593,7 +593,7 @@
   src: "§4.1, §7.2"
   ms: 4
   tier: L3
-  text: "Partial progress survives a restart: pieces verified before the restart are never requested again."
+  text: "Partial progress survives a restart: pieces verified before the restart are never requested again. Setup requires robustness too: the seeder never answers requests for half the pieces, so reaching 50% within 30 s needs request expiry and a periodic pipeline top-up rather than in-order fetching."
   check: {go: ./acceptance/swarm, module: harness, run: TestPartialProgressSurvivesRestart}
 
 - id: RES-05
