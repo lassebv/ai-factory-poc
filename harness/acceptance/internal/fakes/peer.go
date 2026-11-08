@@ -27,6 +27,14 @@ type PeerOptions struct {
 	Garbage     bool          // after the handshake, send random bytes and hang up
 	Oversize    bool          // after bitfield+unchoke, send a message longer than 16 KiB + 13 bytes
 	Seed        uint64
+
+	// Holdout behaviors (milestone 3 quality comparison).
+	CorruptAll     bool          // every block at offset 0 has a flipped byte, always
+	DropAfter      int           // when > 0, the first connection is closed after this many blocks
+	ChokeAfter     int           // when > 0, choke once after this many blocks...
+	ChokeFor       time.Duration // ...for this long, then unchoke
+	HaveNoBitfield bool          // announce pieces with `have` messages instead of a bitfield
+	Bogus          bool          // after unchoke, send pieces nobody asked for (bad index, bad length, unrequested)
 }
 
 // Handshake is what torrentd sent.
@@ -212,9 +220,22 @@ func (p *Peer) serve(c net.Conn) {
 		defer wmu.Unlock()
 		return writeMsg(c, id, payload)
 	}
-	if err := send(5, bf); err != nil {
+	if p.opts.HaveNoBitfield {
+		for i := 0; i < np; i++ {
+			have := make([]byte, 4)
+			binary.BigEndian.PutUint32(have, uint32(i))
+			if err := send(4, have); err != nil {
+				return
+			}
+		}
+	} else if err := send(5, bf); err != nil {
 		return
 	}
+	p.mu.Lock()
+	connNo := p.stats.Connections
+	p.mu.Unlock()
+	sentHere := 0
+	choked := false
 
 	if p.opts.Oversize {
 		send(1, nil) // unchoke
@@ -267,6 +288,9 @@ func (p *Peer) serve(c net.Conn) {
 			p.corrupted[int(r.Index)] = true
 			block[0] ^= 0xff
 		}
+		if p.opts.CorruptAll && r.Begin == 0 {
+			block[0] ^= 0xff
+		}
 		p.stats.BlocksSent++
 		p.mu.Unlock()
 		payload := make([]byte, 8+len(block))
@@ -279,6 +303,23 @@ func (p *Peer) serve(c net.Conn) {
 		qmu.Lock()
 		outstanding--
 		qmu.Unlock()
+		sentHere++
+		if p.opts.DropAfter > 0 && connNo == 1 && sentHere >= p.opts.DropAfter {
+			c.Close()
+			return false
+		}
+		if p.opts.ChokeAfter > 0 && !choked && sentHere >= p.opts.ChokeAfter {
+			choked = true
+			send(0, nil) // choke: per BEP 3 the client must re-request after unchoke
+			time.Sleep(p.opts.ChokeFor)
+			qmu.Lock()
+			for len(queue) > 0 { // pending requests are discarded while choked
+				<-queue
+				outstanding--
+			}
+			qmu.Unlock()
+			send(1, nil)
+		}
 		return true
 	}
 
@@ -336,6 +377,18 @@ func (p *Peer) serve(c net.Conn) {
 		switch msg[0] {
 		case 2: // interested
 			send(1, nil) // unchoke
+			if p.opts.Bogus {
+				bogus := func(index, begin uint32, n int) {
+					pl := make([]byte, 8+n)
+					binary.BigEndian.PutUint32(pl, index)
+					binary.BigEndian.PutUint32(pl[4:], begin)
+					send(7, pl)
+				}
+				bogus(uint32(np+5), 0, 16384)                       // index out of range
+				bogus(0, uint32(p.t.PieceSize(0)), 16384)           // begin past the piece end
+				bogus(0, 0, 100)                                    // unrequested, odd length
+				bogus(uint32(np-1), 0, int(p.t.PieceSize(np-1))+16) // longer than the piece
+			}
 		case 6, 8: // request, cancel
 			if len(msg) != 13 {
 				p.bad("request/cancel with %d-byte payload", len(msg)-1)

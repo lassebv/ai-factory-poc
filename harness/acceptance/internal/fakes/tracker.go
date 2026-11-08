@@ -73,6 +73,13 @@ func (t *Tracker) SetCompact(c bool) {
 	t.mu.Unlock()
 }
 
+// SetFailure makes every announce return "failure reason" (empty clears it).
+func (t *Tracker) SetFailure(reason string) {
+	t.mu.Lock()
+	t.failure = reason
+	t.mu.Unlock()
+}
+
 // Announces returns a copy of every announce so far.
 func (t *Tracker) Announces() []Announce {
 	t.mu.Lock()
