@@ -1,6 +1,6 @@
 package piece
 
-// FROZEN CONTRACT TESTS (ADR-0011). Owned by the architect. Every correct
+// FROZEN CONTRACT TESTS (ADR-0017, ADR-0011). Owned by the architect. Every correct
 // implementation of contract.go must pass these.
 
 import (
@@ -126,7 +126,7 @@ func drain(t *testing.T, pk Picker, p PeerKey, batch int) []Block {
 		}
 		for _, b := range bs {
 			all = append(all, b)
-			ok, done := pk.Received(p, b)
+			ok, done, _ := pk.Received(p, b)
 			if !ok {
 				t.Fatalf("Received(%+v) was not accepted", b)
 			}
@@ -209,12 +209,27 @@ func TestContractPickerRespectsAvailability(t *testing.T) {
 	if len(bs) != 1 || bs[0].Index != 2 {
 		t.Fatalf("Pick = %v, want only piece 2", bs)
 	}
-	// A second peer must not get the outstanding block (no endgame at M3).
+	// A second peer gets every other block first; the outstanding block
+	// only comes last, as an endgame duplicate (ADR-0017).
 	pk.PeerBitfield(2, full(4))
-	for _, b := range pk.Pick(2, 10) {
+	bs = pk.Pick(2, 10)
+	if len(bs) != 4 || bs[3].Index != 2 {
+		t.Fatalf("Pick = %v, want pieces 0, 1, 3, then the endgame duplicate of piece 2", bs)
+	}
+	for _, b := range bs[:3] {
 		if b.Index == 2 {
-			t.Fatalf("block %+v handed out twice", b)
+			t.Fatalf("block %+v handed out twice before endgame", b)
 		}
+	}
+	if !pk.Endgame() {
+		t.Fatal("every block is requested: Endgame() should be true")
+	}
+	ok, _, cancel := pk.Received(2, bs[3])
+	if !ok || len(cancel) != 1 || cancel[0] != 1 {
+		t.Fatalf("endgame duplicate: accepted=%v cancel=%v, want true [1]", ok, cancel)
+	}
+	if pk.Outstanding(1) != 0 {
+		t.Fatal("the duplicate's other owner must lose the block")
 	}
 }
 
@@ -250,7 +265,7 @@ func TestContractPickerReleaseAndRemove(t *testing.T) {
 	pk.PeerBitfield(1, full(2))
 	pk.PeerBitfield(2, full(2))
 	a := pk.Pick(1, 4)
-	if len(a) != 4 || len(pk.Pick(2, 4)) != 0 {
+	if len(a) != 4 || pk.Endgame() == false {
 		t.Fatalf("peer 1 should hold all 4 blocks, got %v", a)
 	}
 	pk.Release(1)
@@ -281,19 +296,21 @@ func TestContractPickerReceivedRules(t *testing.T) {
 		t.Fatalf("Pick = %v, want two blocks of piece 0 and the 100-byte block of piece 1", bs)
 	}
 	for _, bad := range []Block{{0, 1, BlockSize}, {0, 0, 100}, {5, 0, BlockSize}, {1, 0, BlockSize}} {
-		if ok, _ := pk.Received(1, bad); ok {
+		if ok, _, _ := pk.Received(1, bad); ok {
 			t.Errorf("Received(%+v) accepted a block that is not in the layout", bad)
 		}
 	}
-	if ok, done := pk.Received(1, bs[0]); !ok || done {
+	if ok, _, _ := pk.Received(2, bs[0]); ok {
+		t.Fatal("a block from a peer it was not requested from must be rejected (POISON-01)")
+	}
+	if ok, done, _ := pk.Received(1, bs[0]); !ok || done {
 		t.Fatalf("first block: accepted=%v done=%v, want true false", ok, done)
 	}
-	if ok, _ := pk.Received(1, bs[0]); ok {
+	if ok, _, _ := pk.Received(1, bs[0]); ok {
 		t.Fatal("a duplicate block must not be accepted")
 	}
-	// A block from a peer it was not requested from is still useful.
-	if ok, done := pk.Received(2, bs[1]); !ok || !done {
-		t.Fatalf("second block via another peer: accepted=%v done=%v, want true true", ok, done)
+	if ok, done, _ := pk.Received(1, bs[1]); !ok || !done {
+		t.Fatalf("second block: accepted=%v done=%v, want true true", ok, done)
 	}
 	if pk.Outstanding(1) != 1 {
 		t.Fatalf("Outstanding = %d, want 1 (only piece 1's block)", pk.Outstanding(1))
@@ -304,7 +321,7 @@ func TestContractPickerReceivedRules(t *testing.T) {
 			t.Fatalf("pending piece picked again: %+v", b)
 		}
 	}
-	if ok, _ := pk.Received(1, bs[0]); ok {
+	if ok, _, _ := pk.Received(1, bs[0]); ok {
 		t.Fatal("a block of a pending piece must not be accepted")
 	}
 	pk.PieceFailed(0)
@@ -319,10 +336,10 @@ func TestContractPickerReceivedRules(t *testing.T) {
 	if !pk.Have().Has(0) || pk.Done() {
 		t.Fatal("piece 0 verified, piece 1 not yet")
 	}
-	if ok, _ := pk.Received(1, Block{0, 0, BlockSize}); ok {
+	if ok, _, _ := pk.Received(1, Block{0, 0, BlockSize}); ok {
 		t.Fatal("a block of a verified piece must not be accepted")
 	}
-	if ok, done := pk.Received(1, bs[2]); !ok || !done {
+	if ok, done, _ := pk.Received(1, bs[2]); !ok || !done {
 		t.Fatal("piece 1's single block should complete it")
 	}
 	pk.PieceVerified(1)

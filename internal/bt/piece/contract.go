@@ -1,7 +1,8 @@
 // Package piece holds the piece bitfield and the piece picker (§4.1 Piece
 // selection, §16.2 A5, D1).
 //
-// FROZEN CONTRACT (ADR-0011, ADR-0012). This file is owned by the architect.
+// FROZEN CONTRACT (ADR-0011, ADR-0012, ADR-0017). This file is owned by the
+// architect.
 // Implementers provide the unexported functions and the Bitfield methods
 // listed below in their own files (replacing stub.go) and must not change
 // anything declared here.
@@ -99,30 +100,53 @@ type Layout struct {
 // A key must not be reused while the peer is registered.
 type PeerKey uint64
 
+// Priority is a piece priority class (§4.3, A5). A piece's priority is the
+// maximum priority of the wanted files it overlaps; M6 sets it from file
+// priorities. Every piece starts at PriorityNormal.
+type Priority int8
+
+// Priority classes, lowest first. PrioritySkip pieces are never picked and
+// do not count for Done.
+const (
+	PrioritySkip Priority = iota
+	PriorityLow
+	PriorityNormal
+	PriorityHigh
+)
+
 // Picker decides which blocks to request from which peer. It tracks peer
-// availability, outstanding requests, received blocks and verified pieces.
+// availability, per-peer block ownership, received blocks and verified
+// pieces.
 //
 // Block states: a block is *needed* until it is picked (then *outstanding*
-// for one peer) and then *received*. A piece whose blocks are all received
-// is *pending* until the caller reports the hash result: PieceVerified makes
-// it *have*; PieceFailed makes all its blocks needed again.
+// for one peer, or several in endgame) and then *received*. A piece whose
+// blocks are all received is *pending* until the caller reports the hash
+// result: PieceVerified makes it *have*; PieceFailed makes all its blocks
+// needed again.
 //
-// Selection rules for Pick (M3; ADR-0012). Only blocks that are needed, of
-// pieces the peer has, are returned; outstanding blocks are never handed out
-// twice (no endgame at M3). Order:
+// Selection rules for Pick (M4; ADR-0017). Only blocks of wanted pieces the
+// peer has are returned, and never a block already outstanding for p.
+// Order:
 //
-//  1. Pieces already in progress (at least one block outstanding or
-//     received), lowest index first.
-//  2. Then new pieces, rarest first (fewest registered peers having them),
-//     ties broken by the lowest index.
+//  1. Needed blocks of in-progress pieces that no other peer has blocks
+//     outstanding in (piece affinity), highest priority then lowest index.
+//  2. New pieces, strictly by priority class. Within a class: while fewer
+//     than 4 pieces are verified and the Picker has a random source,
+//     random order (random-first); otherwise rarest first (fewest
+//     registered peers having them), ties broken randomly (by lowest index
+//     without a random source). Pick does not sort every piece.
+//  3. Needed blocks of in-progress pieces other peers are working on.
+//  4. Endgame (A5): once every wanted block has been requested at least
+//     once, blocks outstanding for other peers are handed out again.
+//     Received reports the other owners so the caller can cancel them.
 //
-// Within a piece, blocks are returned in ascending Begin order. The random
-// source is reserved for M4 (random-first); an M3 picker is deterministic.
+// Within a piece, blocks are returned in ascending Begin order.
 type Picker interface {
 	// AddPeer registers p with no pieces. Adding a registered peer is a no-op.
 	AddPeer(p PeerKey)
 	// RemovePeer forgets p's availability and makes its outstanding blocks
-	// needed again. Unknown peers are ignored.
+	// needed again (unless still outstanding for another peer). Unknown
+	// peers are ignored.
 	RemovePeer(p PeerKey)
 	// PeerBitfield replaces p's availability with bf (registering p if
 	// needed). A bf whose Len differs from Layout.NumPieces is ignored.
@@ -130,20 +154,23 @@ type Picker interface {
 	// PeerHave adds piece index to p's availability (registering p if
 	// needed). Out-of-range indexes are ignored.
 	PeerHave(p PeerKey, index int)
-	// Pick returns up to max needed blocks to request from p, marks them
+	// Pick returns up to max blocks to request from p, marks them
 	// outstanding for p, and returns nil if there is nothing to request.
 	Pick(p PeerKey, max int) []Block
-	// Received records a block from p. accepted is true if b is exactly a
-	// block of the layout (Begin a multiple of BlockSize, correct Length),
-	// its piece is neither have nor pending, and the block was not already
-	// received; it then becomes received (and leaves every peer's
-	// outstanding set). It does not need to have been outstanding for p.
-	// pieceDone is true if this block made its piece pending, which means
-	// the caller must now hash it. A rejected block is wasted data.
-	Received(p PeerKey, b Block) (accepted, pieceDone bool)
-	// Release makes p's outstanding blocks needed again but keeps its
-	// availability, e.g. when p chokes us.
-	Release(p PeerKey)
+	// Received records a block from p. accepted is true only if b is
+	// exactly a block of the layout that is outstanding for p (requested
+	// from p and neither received, cancelled nor released since); it then
+	// becomes received and leaves every peer's outstanding set. cancel
+	// lists the other peers it was outstanding for (endgame duplicates),
+	// whose requests the caller should cancel. pieceDone is true if this
+	// block made its piece pending, which means the caller must now hash
+	// it. A rejected block is wasted data.
+	Received(p PeerKey, b Block) (accepted, pieceDone bool, cancel []PeerKey)
+	// Release makes p's outstanding blocks needed again (unless still
+	// outstanding for another peer) but keeps its availability, e.g. when
+	// p chokes us or a request timed out. It returns the released blocks
+	// in (Index, Begin) order so the caller can cancel them.
+	Release(p PeerKey) []Block
 	// Outstanding returns the number of blocks outstanding for p.
 	Outstanding(p PeerKey) int
 	// PieceVerified marks a pending piece as have. It also accepts a piece
@@ -151,14 +178,27 @@ type Picker interface {
 	PieceVerified(index int)
 	// PieceFailed makes every block of a pending piece needed again.
 	PieceFailed(index int)
+	// Discard makes the received blocks of an in-progress piece needed
+	// again (e.g. they came from a peer that was just banned). Outstanding
+	// blocks stay outstanding. Other states are ignored.
+	Discard(index int)
+	// SetPriority sets the priority class of piece index. Out-of-range
+	// indexes and priorities are ignored.
+	SetPriority(index int, prio Priority)
+	// Endgame reports whether every wanted block has been requested at
+	// least once while some wanted piece is still missing.
+	Endgame() bool
 	// Have returns a copy of the verified pieces.
 	Have() *Bitfield
-	// Done reports whether every piece is have.
+	// HaveCount returns the number of verified pieces.
+	HaveCount() int
+	// Done reports whether every wanted (not PrioritySkip) piece is have.
 	Done() bool
 }
 
 // NewPicker returns a Picker for the layout with nothing verified and no
-// peers. rnd may be nil at M3.
+// peers. rnd drives random-first and tie-breaking; nil gives a deterministic
+// picker (no random-first, ties by lowest index).
 func NewPicker(l Layout, rnd *rand.Rand) Picker { return newPicker(l, rnd) }
 
 // PipelineDepth returns the number of requests to keep outstanding for a
