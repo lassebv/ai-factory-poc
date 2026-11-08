@@ -1,5 +1,7 @@
 # Retrospective: Approach A vs Approach C (milestones 1–3)
 
+> **Update (2026-11-08):** the controlled comparison recommended below has been run. See [`2026-11-08-a-vs-c-m3/`](2026-11-08-a-vs-c-m3/README.md). Result: on the same milestone and harness, **C produced the better implementation** (design, tests, robustness against corrupt peers, shutdown correctness, memory) at **2.1× A's cost**, and each approach shipped one serious robustness defect. The recommendation for M4 is unchanged: **A+**, an architect phase followed by one implementer.
+
 **Question:** which factory approach has worked best so far: **A** (one implementer agent with a strong harness) or **C** (an architect freezes contracts, parallel package implementers build against them, an integrator merges)?
 
 **Short answer:**

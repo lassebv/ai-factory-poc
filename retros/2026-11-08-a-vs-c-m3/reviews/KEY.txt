@@ -1,0 +1,2 @@
+r1: X=A Y=C; r2: X=C Y=A
+r3: X=A Y=C; r4: X=C Y=A
