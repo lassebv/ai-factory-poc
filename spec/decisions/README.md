@@ -15,6 +15,7 @@ ADRs record decisions that involve a real trade-off and were made by the human o
 | [0009](0009-quality-gates.md) | Code-quality gates | A14 | Accepted |
 | [0010](0010-schema-evolution.md) | Schema evolution before and after v1 | T7 | Accepted |
 | [0016](0016-m4-lifecycle-api-and-test-contract.md) | M4 pulls pause/resume/stop-seeding forward; M4 test contract | §15.4 | Accepted |
+| [0017](0017-m4-contract-evolution.md) | M4 contract evolution: picker (endgame, strict Received, priorities), Storage.Sync, session Store/lifecycle, API actions | §4.1, §4.5, §7 | Accepted |
 | [0011](0011-m3-download-api-and-frozen-contracts.md) | M3 pulls a minimal add/get API forward; `contract.go` files are frozen | §15.3 | Accepted |
 | [0012](0012-m3-contract-shape-and-piece-order.md) | M3 contract shape; in-order piece selection at M3 | §4.1, A5 | Accepted |
 | [0013](0013-m3-storage-write-through-and-verify-from-disk.md) | Blocks are written on arrival; pieces are verified from disk | §4.5, D9 | Accepted |

@@ -1,5 +1,42 @@
 # PROGRESS — torrentd
 
+## Status (2026-11-08): milestone 4 (swarm engine), Approach A
+- All 25 runnable M4 checks pass when run individually: SEED-01/02 (libtorrent in Docker), SWARM-01, CHOKE-01, WIRE-03, PICK-01/02, PIPE-01, BAN-01, POISON-01, CPU-01, RES-01..07, STOP-01, PAUSE-01, LIFE-04, SHUT-01, MEM-01, FD-01 and RACE-01.
+- **AC-06 is `missing`:** `./tools/swarm` doesn't exist and its test would be verifier-owned. See `escalations/M4-ac06-tools-swarm-missing.md`. Because of this, `gate --upto 4` cannot exit 0.
+- Coverage: session 86.9%, piece 97.9%, storage 96.0%, store 87.5%, api 92.9%.
+- Contract changes are recorded in ADR-0017.
+
+## Milestone 4: what was built
+- **piece:** a new picker.
+  - Pick order: piece affinity, then new pieces by priority class (random-first for the first 4, then rarest-first with random ties), then other peers' in-progress pieces, then endgame duplicates.
+  - `Received` only accepts blocks outstanding for that peer, and returns the peers to cancel.
+  - `Release` returns the released blocks. Also new: `Discard`, `SetPriority`, `Endgame`, `HaveCount`.
+  - Pick is a single scan with a bounded candidate set, with no full sort.
+- **storage:** `Sync()` fsyncs dirty files.
+- **session:**
+  - `pool.go`: process-wide disk and hash pools, non-blocking submit.
+  - `incoming.go`: accept loop and incoming handshakes, 10 s deadline, ban and accepting checks.
+  - `torrent.go` + `checking.go`: the actor, lifecycle (halt, command, fail, finish), open/check/resume, hash results, strikes and bans, snapshots and the final record.
+  - `peers.go`: dialling, the download side, the pipeline (depth from max(smoothed rate, average since connect)), request timeout and snubbing.
+  - `upload.go`: serving requests through the disk pool, the choker (4 regular slots plus 1 optimistic, filled immediately; 10 s rounds; rotation every 30 s), and the 1 s tick.
+  - `resume.go`: per-file size/mtime fingerprint, the missing-files check, `wantedBytes`.
+  - `session.go`: Load/Add, lifecycle dispatch, strikes and bans (persisted), the flusher (every 10 s, on Add and after actions, Sync before saving), and Close (flusher stop → actors → pools → final save).
+- **store:** `torrents.go` implements `session.Store` (torrents, trackers, banned_peers).
+- **api:** the pause/resume/stop-seeding routes and `stopReason`.
+- **cmd:** `startEngine` passes the store and the clean flag, and calls `Load`.
+
+### Interpretations (M4)
+- **Data on add:** if any file already has data on disk, adding the torrent triggers a full check. Otherwise checking only opens storage.
+- **Restored torrents:** paused and stopped torrents don't open storage until they are resumed. Their progress comes from the saved bitfield.
+- **Fast resume:** fingerprint mismatch, or an unclean shutdown with any size mismatch, triggers a full recheck, and all saved pieces are forgotten. A torrent with an empty saved bitfield is never checked.
+- **Pause:** allowed in checking and downloading. It's a no-op when already paused, and `invalid_state` on a complete torrent, in error or in stopped.
+- **Stop seeding:** a no-op when stopped. `not_complete` when incomplete. `invalid_state` in checking or error with complete data.
+- **Resume in error:** retries with a full recheck. For "Files missing" it goes back to error while the files are still gone.
+- **Seeding torrents don't dial out.** On completion, connected seeds are dropped.
+- **Oversize requests** (more than 16 KiB) disconnect the peer; there's no BEP 6 yet. Invalid requests also disconnect. Requests from choked peers are ignored.
+- **Ban side effects:** a ban closes that IP's peers in every torrent and discards in-progress pieces it contributed to. Pieces that are pending hashing still fail and strike.
+- **Backlog limit:** at most 512 received blocks wait for the disk. Above that, `fill` pauses until the backlog has halved.
+
 ## Status (2026-11-07): milestone 3 (single-peer download), Approach C
 `harness/factory gate --upto 3`: 54/54 pass (M1 18, M2 21, M3 15), including
 SP-01 against the libtorrent seeder in Docker. All 15 M3 checks passed on
