@@ -1,5 +1,53 @@
 # PROGRESS — torrentd
 
+## Milestone 4 (swarm engine), Approach A+ (single implementer on frozen contracts)
+I built the work packages WP1–WP7 from `spec/plans/m4-work-packages.md` in order, each against its frozen contract tests.
+
+- `internal/bt/piece`: the picker was rewritten (`picker.go`, `pick.go`, `layout.go`).
+  - Per-block owners with request times, plus a "released" list so late answers are still accepted.
+  - Fresh pieces live in per-class availability buckets (indexed sets, with a random start for tie-breaks). Started pieces are in a per-class active set.
+  - Rules 2–5 follow ADR-0018. After a hash failure, a piece is exclusive to one peer.
+  - Expiry uses a FIFO of requests (lazy invalidation).
+  - O(1) `Interesting` and verified-count. No per-call scan of all pieces (`TestContractPickerCost`).
+- `internal/bt/choke`:
+  - The choker: ranked by not-snubbed, then rate, then current holder, then random. Optimistic peer kept for 30 s. `Fill` keeps the existing slots.
+  - The meter: a 250 ms-slot ring over 5 s.
+- `internal/bt/storage`:
+  - A FIFO worker `Pool`; the storage runs its work on the shared `Pools`, with private pools when none are given.
+  - Close cancels queued work (it gets ErrClosed).
+  - `VerifyPieceAsync` hashes on a hash worker, reading the files directly with a 256 KiB buffer.
+  - `Sync` fsyncs every file written since the last Sync, reopening evicted ones. `Stat` and `PlanResume` (pure).
+- `internal/bt/peer`: `AcceptHandshake`, and `OnPieceSent` called after the flush that wrote the piece.
+- `internal/store`: `torrents.go` (Load/SaveTorrents in one transaction, bans). Times are RFC 3339 UTC.
+- `internal/bt/session`: rewritten.
+  - `session.go`: listener, incoming handshakes (≤ 64 at once), bans and strikes, actions, Close.
+  - `torrent.go`: actor, lifecycle, checking, publish.
+  - `peers.go`: connections, the download data path, choking, uploads.
+  - `pieces.go`: writes, hashing, verification.
+  - `persist.go`: flush.
+- Data path, as in ADR-0017:
+  - The read goroutine sends `evBlock` and waits on a per-peer reply channel. If the block is accepted, it calls `WriteBlock` itself and then reports `evWritten`.
+  - `VerifyPieceAsync` runs once a pending piece's writes are done. Its callback calls `MarkVerified` and sends `evVerified`.
+  - Uploads: one helper goroutine per peer, fed through a channel with capacity `UploadReadAhead`. `OnPieceSent` counts `uploadedTotal` atomically and does a non-blocking wake of the actor; the tick also pumps the queues.
+- Persistence:
+  - The actor publishes a `persistSnap` (the record) with every Status.
+  - The flusher runs every 10 s, and on request after each state change. It does Sync → Stat → one SaveTorrents.
+  - `Close`: stop the flusher → actors shut down (stopped announces in parallel with closing peers) → final flush → close storages → close pools.
+- `internal/api`: lifecycle routes (204 / 404 / 409); `stopReason` and `checkingProgress` in the JSON.
+- `cmd/torrentd`: the store is the session's Store, and `PreviousClean` comes from `BeginSession`.
+
+### Interpretations (M4)
+- **StartPaused:** Add returns `paused` (the frozen test wants this). The local check still runs, but it is reported as `paused` (`hideCheck`). See `escalations/M4-contract-startpaused-initial-state.md`.
+- **Stale requests:** a peer may never answer some pieces (RES-04's StallFrom peer).
+  - Requests outstanding for longer than max(1 s, 4 × the peer's smoothed latency) don't count against its pipeline depth.
+  - The total stays capped at 250, and every tick tops up all pipelines.
+  - Expiry, which takes the blocks back after 20 s, is unchanged.
+- **Redial backoff:** none for peers we close ourselves on pause or stop. The backoff map is cleared on teardown, so resume redials at once (PAUSE-01).
+- **Resume from error:** a full recheck. The picker is rebuilt, and every piece overlapping an existing file is hashed.
+- **Restored `paused` + complete:** goes to stopped/user, the same as a StartPaused add over complete data.
+- **Bans:** strikes and bans are process-wide. The ban is persisted in a tracked goroutine, so the actor never blocks on the DB. Other torrents get an `evBanned` event.
+- **AC-06:** its test package `./tools/swarm` doesn't exist, and I can't create a counting test. See `escalations/M4-ac06-missing-test-package.md`.
+
 ## Status (2026-11-07): milestone 3 (single-peer download), Approach C
 `harness/factory gate --upto 3`: 54/54 pass (M1 18, M2 21, M3 15), including
 SP-01 against the libtorrent seeder in Docker. All 15 M3 checks passed on

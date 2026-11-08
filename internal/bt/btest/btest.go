@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"torrentd/internal/clock"
 
 	"torrentd/internal/store"
 )
@@ -71,7 +72,8 @@ func CheckGoroutines(t testing.TB, ignore ...string) {
 	ign := append(append([]string{}, defaultIgnore...), ignore...)
 	t.Cleanup(func() {
 		var leaked []string
-		deadline := time.Now().Add(5 * time.Second)
+		clk := clock.Real()
+		deadline := clk.Now().Add(5 * time.Second)
 		for {
 			leaked = leaked[:0]
 			for id, s := range stacks() {
@@ -80,10 +82,10 @@ func CheckGoroutines(t testing.TB, ignore ...string) {
 				}
 				leaked = append(leaked, s)
 			}
-			if len(leaked) == 0 || time.Now().After(deadline) {
+			if len(leaked) == 0 || clk.Now().After(deadline) {
 				break
 			}
-			time.Sleep(20 * time.Millisecond)
+			<-clk.After(20 * time.Millisecond)
 		}
 		if len(leaked) > 0 {
 			sort.Strings(leaked)
