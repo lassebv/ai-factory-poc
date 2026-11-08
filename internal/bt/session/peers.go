@@ -138,7 +138,7 @@ func (t *torrent) connected(ev evHandshaken) {
 		Logger:         t.s.log,
 	})
 	t.peers[key] = p
-	t.picker.AddPeer(key)
+	t.picker.AddPeer(key, netip.Addr{})
 	t.s.log.Debug("peer connected", "torrent", t.m.HexHash(), "peer", ev.addr)
 }
 
@@ -227,7 +227,8 @@ func (t *torrent) block(p *peerState, m peer.Message) {
 		return
 	}
 	b := piece.Block{Index: m.Index, Begin: m.Begin, Length: uint32(len(m.Block))}
-	accepted, pieceDone := t.picker.Received(p.key, b)
+	rc := t.picker.Received(p.key, b)
+	accepted, pieceDone := rc.Accepted, rc.PieceDone
 	if !accepted {
 		t.wasted.Add(n)
 	} else {

@@ -2,6 +2,7 @@ package piece
 
 import (
 	"math/rand/v2"
+	"net/netip"
 	"slices"
 )
 
@@ -97,7 +98,8 @@ type picker struct {
 	rnd    *rand.Rand // reserved for M4 random-first; unused at M3
 }
 
-func newPicker(l Layout, rnd *rand.Rand) Picker {
+func newPicker(l Layout, opts Options) Picker {
+	rnd := opts.Rand
 	n := max(l.NumPieces, 0)
 	l.NumPieces = n
 	return &picker{
@@ -119,7 +121,7 @@ func (pk *picker) peer(p PeerKey) *peerInfo {
 }
 
 // AddPeer registers p with no pieces.
-func (pk *picker) AddPeer(p PeerKey) { pk.peer(p) }
+func (pk *picker) AddPeer(p PeerKey, _ netip.Addr) { pk.peer(p) }
 
 // RemovePeer forgets p's availability and releases its outstanding blocks.
 func (pk *picker) RemovePeer(p PeerKey) {
@@ -271,7 +273,12 @@ func (pk *picker) unown(i, j int) {
 }
 
 // Received records a block from p.
-func (pk *picker) Received(_ PeerKey, b Block) (accepted, pieceDone bool) {
+func (pk *picker) Received(p PeerKey, b Block) Receipt {
+	a, d := pk.receivedM3(p, b)
+	return Receipt{Accepted: a, PieceDone: d}
+}
+
+func (pk *picker) receivedM3(_ PeerKey, b Block) (accepted, pieceDone bool) {
 	j, ok := pk.blockIndex(b)
 	if !ok {
 		return false, false
@@ -345,14 +352,15 @@ func (pk *picker) PieceVerified(index int) {
 }
 
 // PieceFailed makes every block of a pending piece needed again.
-func (pk *picker) PieceFailed(index int) {
+func (pk *picker) PieceFailed(index int) []netip.Addr {
 	if index < 0 || index >= pk.l.NumPieces || pk.pieces[index].state != piecePending {
-		return
+		return nil
 	}
 	ps := &pk.pieces[index]
 	ps.state = pieceNeeded
 	ps.blocks, ps.owner = nil, nil
 	ps.outstanding, ps.received = 0, 0
+	return nil
 }
 
 // Have returns a copy of the verified pieces.

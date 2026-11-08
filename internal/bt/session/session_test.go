@@ -140,7 +140,7 @@ func addFakePeer(tor *torrent, port uint16) (*fakeConn, piece.PeerKey) {
 	k := tor.nextKey
 	tor.peers[k] = &peerState{key: k, addr: netip.AddrPortFrom(netip.MustParseAddr("10.0.0.1"), port),
 		conn: c, choked: true, since: tor.s.clk.Now()}
-	tor.picker.AddPeer(k)
+	tor.picker.AddPeer(k, netip.Addr{})
 	return c, k
 }
 

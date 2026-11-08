@@ -120,7 +120,7 @@ func TestPickerReleaseKeepsPartialPieceInProgress(t *testing.T) {
 	if len(bs) != 2 || bs[0].Index != 2 {
 		t.Fatalf("Pick = %v", bs)
 	}
-	if ok, _ := pk.Received(3, bs[0]); !ok {
+	if ok, _ := recvM3(pk, 3, bs[0]); !ok {
 		t.Fatal("not accepted")
 	}
 	pk.Release(3)
@@ -173,7 +173,7 @@ func TestPickerReceivedUnrequestedStartsPiece(t *testing.T) {
 	l := Layout{NumPieces: 3, PieceLength: 2 * BlockSize, TotalLength: 6 * BlockSize}
 	pk := NewPicker(l, nil)
 	pk.PeerBitfield(1, full(3))
-	if ok, done := pk.Received(1, Block{2, BlockSize, BlockSize}); !ok || done {
+	if ok, done := recvM3(pk, 1, Block{2, BlockSize, BlockSize}); !ok || done {
 		t.Fatal("unrequested block of a needed piece is accepted")
 	}
 	// Piece 2 is now in progress, so its remaining block comes first.
@@ -182,7 +182,7 @@ func TestPickerReceivedUnrequestedStartsPiece(t *testing.T) {
 	}
 	// A block owned by another peer is accepted from anyone and leaves the
 	// owner's outstanding set.
-	if ok, done := pk.Received(5, Block{2, 0, BlockSize}); !ok || !done {
+	if ok, done := recvM3(pk, 5, Block{2, 0, BlockSize}); !ok || !done {
 		t.Fatal("completing block")
 	}
 	if pk.Outstanding(1) != 0 {
@@ -191,7 +191,7 @@ func TestPickerReceivedUnrequestedStartsPiece(t *testing.T) {
 	// Owner already gone when its block arrives from elsewhere.
 	bs := pk.Pick(1, 1)
 	delete(pk.(*picker).peers, 1)
-	if ok, _ := pk.Received(2, bs[0]); !ok {
+	if ok, _ := recvM3(pk, 2, bs[0]); !ok {
 		t.Fatal("accepted")
 	}
 }
@@ -213,7 +213,7 @@ func TestPickerDrainManyPeers(t *testing.T) {
 				if seen[b] {
 					t.Fatalf("duplicate %v", b)
 				}
-				ok, done := pk.Received(p, b)
+				ok, done := recvM3(pk, p, b)
 				if !ok {
 					t.Fatalf("rejected %v", b)
 				}
@@ -253,10 +253,16 @@ func BenchmarkPickFull250(b *testing.B) {
 		for len(out) > 0 {
 			blk := out[0]
 			out = out[1:]
-			if _, done := pk.Received(1, blk); done {
+			if _, done := recvM3(pk, 1, blk); done {
 				pk.PieceVerified(int(blk.Index))
 			}
 			out = append(out, pk.Pick(1, 1)...)
 		}
 	}
+}
+
+// recvM3 adapts the M3 two-value Received to the M4 Receipt (mechanical).
+func recvM3(pk Picker, p PeerKey, b Block) (bool, bool) {
+	r := pk.Received(p, b)
+	return r.Accepted, r.PieceDone
 }
