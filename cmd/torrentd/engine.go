@@ -15,7 +15,7 @@ import (
 	"torrentd/internal/store"
 )
 
-// Setting keys and defaults used by the engine at M3 (§7 default settings).
+// Setting keys and defaults used by the engine (§7 default settings).
 const (
 	keyListenPort         = "listen_port"
 	keyDefaultDownloadDir = "default_download_dir"
@@ -74,15 +74,22 @@ func defaultDownloadDir(ctx context.Context, st settings, log *slog.Logger) stri
 	return filepath.Join(home, "Downloads")
 }
 
-// startEngine creates the session (§6.1 steps 3 and 4).
-func startEngine(ctx context.Context, cfg config.Config, st settings, log *slog.Logger) (session.Session, error) {
+// startEngine creates the session and restores the saved torrents from db
+// (§6.1 steps 3 and 4); db may be nil (no persistence).
+func startEngine(ctx context.Context, cfg config.Config, st settings, db session.Store, previousClean bool, log *slog.Logger) (session.Session, error) {
 	sess, err := session.New(session.Config{
-		PeerPort:           peerPort(ctx, cfg, st, log),
-		DefaultDownloadDir: defaultDownloadDir(ctx, st, log),
-		Clock:              clock.Real(),
-		Logger:             log,
+		PeerPort:              peerPort(ctx, cfg, st, log),
+		DefaultDownloadDir:    defaultDownloadDir(ctx, st, log),
+		Clock:                 clock.Real(),
+		Logger:                log,
+		Store:                 db,
+		PreviousShutdownClean: previousClean,
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := sess.Load(ctx); err != nil {
+		_ = sess.Close(context.Background())
 		return nil, err
 	}
 	if err := sess.ListenErr(); err != nil {

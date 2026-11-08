@@ -284,3 +284,22 @@ func TestVerifyLargePieceInChunks(t *testing.T) {
 		t.Fatalf("VerifyPiece = %v, %v", ok, err)
 	}
 }
+
+func TestSyncDirtyFiles(t *testing.T) {
+	info, flat := buildInfo("s", 16384, tfile{path: []string{"a"}, size: 20000}, tfile{path: []string{"b"}, size: 5000})
+	s := mustOpen(t, t.TempDir(), info, Options{MaxOpenFiles: 1})
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync with nothing written: %v", err)
+	}
+	writePiece(t, s, info, flat, 1) // spans a and b
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := s.Sync(); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	s.Close()
+	if err := s.Sync(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Sync after Close = %v, want ErrClosed", err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,6 +31,8 @@ type fakeTorrents struct {
 	order   [][20]byte
 	byID    map[[20]byte]session.Status
 	lastOpt session.AddOptions
+	// actionErr is returned by the lifecycle actions on a known id.
+	actionErr error
 }
 
 func (f *fakeTorrents) Add(_ context.Context, m *metainfo.MetaInfo, opts session.AddOptions) (session.Status, error) {
@@ -70,6 +73,18 @@ func (f *fakeTorrents) Get(id [20]byte) (session.Status, bool) {
 	st, ok := f.byID[id]
 	return st, ok
 }
+
+func (f *fakeTorrents) action(id [20]byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.byID[id]; !ok {
+		return session.ErrNotFound
+	}
+	return f.actionErr
+}
+func (f *fakeTorrents) Pause(id [20]byte) error       { return f.action(id) }
+func (f *fakeTorrents) Resume(id [20]byte) error      { return f.action(id) }
+func (f *fakeTorrents) StopSeeding(id [20]byte) error { return f.action(id) }
 
 func contractServer() (*Server, *fakeTorrents) {
 	f := &fakeTorrents{byID: map[[20]byte]session.Status{}}
@@ -282,5 +297,45 @@ func TestContractTorrentRoutes(t *testing.T) {
 	body, ct := addForm(contractTorrent(t, "delta"), nil)
 	if r := call(h, "POST", "/api/v1/torrents/preview", body, ct); r.status != 200 {
 		t.Errorf("preview = %d %s", r.status, r.body)
+	}
+}
+
+func TestContractLifecycleActions(t *testing.T) {
+	s, f := contractServer()
+	h := s.Handler()
+	var id [20]byte
+	id[0] = 0xab
+	f.byID[id] = session.Status{ID: id, State: session.StateStopped, StopReason: session.StopReasonUser}
+	path := "/api/v1/torrents/" + hex.EncodeToString(id[:])
+	for _, act := range []string{"pause", "resume", "stop-seeding"} {
+		if r := call(h, "POST", path+"/"+act, nil, "application/json"); r.status != 204 || len(r.body) != 0 {
+			t.Errorf("%s = %d %s, want 204", act, r.status, r.body)
+		}
+		if r := call(h, "GET", path+"/"+act, nil, ""); r.status != 405 || !strings.Contains(r.header.Get("Allow"), "POST") {
+			t.Errorf("GET %s = %d, want 405 Allow POST", act, r.status)
+		}
+		if r := call(h, "POST", "/api/v1/torrents/"+strings.Repeat("cd", 20)+"/"+act, nil, ""); r.status != 404 || code(t, r) != CodeNotFound {
+			t.Errorf("%s on unknown id = %d", act, r.status)
+		}
+		if r := call(h, "POST", "/api/v1/torrents/xyz/"+act, nil, ""); r.status != 404 {
+			t.Errorf("%s on malformed id = %d", act, r.status)
+		}
+	}
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{session.ErrInvalidState, 409, CodeInvalidState},
+		{session.ErrNotComplete, 409, CodeNotComplete},
+		{errors.New("boom"), 500, CodeInternal},
+	} {
+		f.actionErr = tc.err
+		if r := call(h, "POST", path+"/pause", nil, ""); r.status != tc.status || code(t, r) != tc.code {
+			t.Errorf("error %v: %d %s, want %d %s", tc.err, r.status, r.body, tc.status, tc.code)
+		}
+	}
+	if got := NewTorrent(f.byID[id]); got.StopReason == nil || *got.StopReason != "user" {
+		t.Errorf("stopReason = %v, want user", got.StopReason)
 	}
 }

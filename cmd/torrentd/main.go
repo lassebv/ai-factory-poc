@@ -86,8 +86,8 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	log.Info("database ready", "path", dbPath, "previous_shutdown_clean", previousClean)
 
-	// §6.1 steps 3 and 4: the engine. Torrents are not persisted until M4.
-	sess, err := startEngine(ctx, cfg, st, log)
+	// §6.1 steps 3 and 4: the engine, with the saved torrents.
+	sess, err := startEngine(ctx, cfg, st, st.Torrents(), previousClean, log)
 	if err != nil {
 		return err
 	}
@@ -152,8 +152,9 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	<-serveErr
 	<-engineDone
 
-	// §6.2 steps 3-4: nothing to flush before M4. The clean-shutdown marker
-	// is the last write before closing the DB (C3).
+	// §6.2 steps 3-4: Session.Close has flushed the torrents (after the
+	// announces and the peers). The clean-shutdown marker is the last write
+	// before closing the DB (C3).
 	if err := st.MarkCleanShutdown(context.Background()); err != nil {
 		log.Error("write clean-shutdown marker", "err", err)
 	}

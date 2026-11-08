@@ -3,7 +3,7 @@
 // renames each file when all of its pieces are verified (§4.1 Storage, §4.5,
 // §16.1 C2, §16.2 G21, D9).
 //
-// FROZEN CONTRACT (ADR-0011, ADR-0013). This file is owned by the architect.
+// FROZEN CONTRACT (ADR-0011, ADR-0013, ADR-0017). This file is owned by the architect.
 // The implementer provides, in their own files (replacing stub.go):
 //
 //	func open(dir string, info *metainfo.Info, opts Options) (Storage, error)
@@ -102,6 +102,10 @@ type Storage interface {
 	// to non-pad files: what the piece adds to completedBytes. 0 if out of
 	// range.
 	WantedBytes(index int) int64
+	// Sync fsyncs every file written since the last Sync (§16.3 C3: piece
+	// data is fsynced before a bitfield containing it is persisted). Added
+	// at M4 (ADR-0017).
+	Sync() error
 	// Close flushes and closes all file handles. It is idempotent.
 	Close() error
 }
@@ -114,7 +118,8 @@ type Storage interface {
 // the file's length (truncate, no data written). Zero-length files are
 // created as <path>. Open never deletes or shortens existing data; an
 // existing <path> is used in place, an existing shorter <path>.part is
-// extended. At M3 Open treats every piece as unverified.
+// extended. Open treats every piece as unverified; a caller restoring
+// resume data calls MarkVerified for each trusted piece.
 func Open(dir string, info *metainfo.Info, opts Options) (Storage, error) {
 	return open(dir, info, opts)
 }

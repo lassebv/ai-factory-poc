@@ -1,6 +1,6 @@
 package api
 
-// FROZEN CONTRACT (ADR-0011, ADR-0015) for the milestone 3 torrent routes.
+// FROZEN CONTRACT (ADR-0011, ADR-0015, ADR-0017) for the torrent routes.
 // This file is owned by the architect; the integrator implements the
 // handlers in other files.
 //
@@ -20,6 +20,10 @@ package api
 //	GET  /api/v1/torrents/{id}        get
 //	/api/v1/torrents/{id}             405: Allow: POST when id == "preview",
 //	                                  otherwise Allow: GET (M6 adds PATCH, DELETE)
+//	POST /api/v1/torrents/{id}/pause         (M4, ADR-0016)
+//	POST /api/v1/torrents/{id}/resume        (M4)
+//	POST /api/v1/torrents/{id}/stop-seeding  (M4)
+//	/api/v1/torrents/{id}/<action>    405, Allow: POST, for those three
 //	/api/                             404 not_found
 //	/                                 SPA
 //
@@ -47,6 +51,14 @@ package api
 //   - {id} must be 40 lowercase hex characters (TorrentId schema); an id
 //     that is malformed or unknown is 404 not_found.
 //
+// # Lifecycle actions (M4, §16.4 G18)
+//
+//   - 204 with no body on success (including the no-op cases).
+//   - session.ErrNotFound (or a malformed id) -> 404 not_found;
+//     session.ErrInvalidState -> 409 invalid_state;
+//     session.ErrNotComplete -> 409 not_complete; others -> 500 internal.
+//   - A request body is ignored.
+//
 // When Options.Torrents is nil the torrent routes return 500 internal.
 
 import (
@@ -65,6 +77,13 @@ type TorrentService interface {
 	List() []session.Status
 	// Get returns one torrent.
 	Get(id [20]byte) (session.Status, bool)
+	// Pause, Resume and StopSeeding are the lifecycle actions (see
+	// session.Session).
+	Pause(id [20]byte) error
+	// Resume resumes, resumes seeding or retries a torrent.
+	Resume(id [20]byte) error
+	// StopSeeding stops seeding a complete torrent.
+	StopSeeding(id [20]byte) error
 }
 
 var _ TorrentService = session.Session(nil)
@@ -78,9 +97,10 @@ var _ TorrentService = session.Session(nil)
 //     the denominator is 0 (§16.4 A6).
 //   - AddedAt and CompletedAt are RFC 3339 in UTC; CompletedAt is null when
 //     zero. ErrorMessage is null unless the state is error.
-//   - CheckingProgress is null unless checking (then 0..1). StopReason,
+//   - CheckingProgress is null unless checking (then 0..1). StopReason is
+//     the session's StopReason in state stopped, null otherwise.
 //     EtaSeconds, SwarmSeeders, SwarmLeechers, RatioLimit and
-//     SeedTimeLimitMin are null at M3; SeedingSeconds, DownloadLimit and
+//     SeedTimeLimitMin are null until M6; SeedingSeconds, DownloadLimit and
 //     UploadLimit are 0.
 type Torrent struct {
 	ID               string   `json:"id"`

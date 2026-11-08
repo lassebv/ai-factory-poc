@@ -31,6 +31,8 @@ type file struct {
 	// unverified counts the pieces overlapping the file that are not yet
 	// verified.
 	unverified int
+	// dirty is set by writes and cleared by Sync (guarded by storage.mu).
+	dirty bool
 }
 
 func (f *file) diskPath() string {
@@ -281,6 +283,9 @@ func (s *storage) io(off int64, buf []byte, write bool) error {
 		}
 		defer s.release(h)
 		if write {
+			s.mu.Lock()
+			s.files[fi].dirty = true
+			s.mu.Unlock()
 			_, err = h.f.WriteAt(part, fileOff)
 		} else {
 			var n int
@@ -382,6 +387,41 @@ func (s *storage) finish(fi int) error {
 	}
 	f.final = true
 	return nil
+}
+
+// Sync implements Storage: it fsyncs every file written since the last
+// Sync.
+func (s *storage) Sync() error {
+	if err := s.enter(); err != nil {
+		return err
+	}
+	defer s.leave()
+	s.mu.Lock()
+	var dirty []int
+	for fi := range s.files {
+		if s.files[fi].dirty {
+			s.files[fi].dirty = false
+			dirty = append(dirty, fi)
+		}
+	}
+	s.mu.Unlock()
+	var firstErr error
+	for _, fi := range dirty {
+		h, err := s.acquire(fi)
+		if err == nil {
+			err = h.f.Sync()
+			s.release(h)
+		}
+		if err != nil {
+			s.mu.Lock()
+			s.files[fi].dirty = true
+			s.mu.Unlock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("storage: sync %s: %w", s.files[fi].path, err)
+			}
+		}
+	}
+	return firstErr
 }
 
 // Close implements Storage. It waits for calls in progress, then closes

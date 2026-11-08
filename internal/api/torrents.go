@@ -26,6 +26,44 @@ func (s *Server) routeTorrents(mux *http.ServeMux) {
 		}
 		methodNotAllowed("GET")(w, r)
 	})
+	for _, a := range []struct {
+		name string
+		fn   func(TorrentService, [20]byte) error
+	}{
+		{"pause", TorrentService.Pause},
+		{"resume", TorrentService.Resume},
+		{"stop-seeding", TorrentService.StopSeeding},
+	} {
+		mux.HandleFunc("POST /api/v1/torrents/{id}/"+a.name, s.lifecycle(a.fn))
+		mux.HandleFunc("/api/v1/torrents/{id}/"+a.name, methodNotAllowed("POST"))
+	}
+}
+
+// lifecycle handles POST /api/v1/torrents/{id}/{pause,resume,stop-seeding}.
+func (s *Server) lifecycle(fn func(TorrentService, [20]byte) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		svc, ok := s.torrents(w)
+		if !ok {
+			return
+		}
+		id, ok := parseTorrentID(r.PathValue("id"))
+		if !ok {
+			WriteError(w, http.StatusNotFound, CodeNotFound, "no such torrent")
+			return
+		}
+		switch err := fn(svc, id); {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, session.ErrNotFound):
+			WriteError(w, http.StatusNotFound, CodeNotFound, "no such torrent")
+		case errors.Is(err, session.ErrInvalidState):
+			WriteError(w, http.StatusConflict, CodeInvalidState, "the action is not allowed in the torrent's current state")
+		case errors.Is(err, session.ErrNotComplete):
+			WriteError(w, http.StatusConflict, CodeNotComplete, "the torrent is not complete")
+		default:
+			WriteError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+		}
+	}
 }
 
 // torrents returns the TorrentService or writes a 500.
@@ -169,6 +207,10 @@ func NewTorrent(st session.Status) Torrent {
 			msg = "unknown error"
 		}
 		t.ErrorMessage = &msg
+	}
+	if st.State == session.StateStopped && st.StopReason != "" {
+		reason := string(st.StopReason)
+		t.StopReason = &reason
 	}
 	if st.State == session.StateChecking {
 		p := 0.0
