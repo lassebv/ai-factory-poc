@@ -88,7 +88,7 @@ var Areas = []Area{
 	{
 		Name:     "red-team",
 		Owners:   []Role{Human, Verifier, RedTeam},
-		Prefixes: []string{"harness/redteam/"},
+		Prefixes: []string{"harness/redteam/", "harness/acceptance/redteam/"},
 	},
 	{
 		Name:     "acceptance",

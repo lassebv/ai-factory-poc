@@ -63,6 +63,8 @@ func TestCanWrite(t *testing.T) {
 		{Reviewer, "reviews/M1.md", true},
 		{RedTeam, "harness/redteam/peer_test.go", true},
 		{RedTeam, "harness/fixtures/x", false},
+		{RedTeam, "harness/acceptance/redteam/m5/x_test.go", true},
+		{Implementer, "harness/acceptance/redteam/m5/x_test.go", false},
 		{Unknown, "internal/x.go", false},
 		{Unknown, "escalations/x.md", true},
 	}
