@@ -5,7 +5,7 @@
 set -uo pipefail
 T="$(cd "$1" && pwd)"; L="${2:-$(basename "$T")}"
 cd "$T"
-PKGS="internal/bt/tracker internal/bt/peer internal/bt/piece internal/bt/storage internal/bt/session internal/api cmd/torrentd"
+PKGS="${PKGS:-internal/bt/tracker internal/bt/peer internal/bt/piece internal/bt/storage internal/bt/session internal/bt/choke internal/store internal/api cmd/torrentd}"
 prodfiles() { find $PKGS -name '*.go' ! -name '*_test.go' 2>/dev/null; }
 testfiles() { find $PKGS -name '*_test.go' 2>/dev/null; }
 count() { local n=0; while read -r f; do n=$((n + $(grep -cv '^[[:space:]]*$' "$f"))); done; echo $n; }

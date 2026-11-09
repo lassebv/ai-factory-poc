@@ -331,6 +331,8 @@ Milestones 3–4 (single-peer download, then the swarm engine). Use **Approach C
 
 *Status (2026-11-08):* M3 was run with both A and C ([comparison](retros/2026-11-08-a-vs-c-m3/README.md)). C produced better quality at 2.1× A's cost, and that quality came from the architect. M4 will therefore be run with **A+**.
 
+*Status (2026-11-09):* M4 was run with A+ and A ([comparison](retros/2026-11-09-a-vs-aplus-m4/README.md)). A+ won clearly: blind reviews 53.5 vs 43.0 (4 of 4 preferred it), it passed all hidden tests (A failed one), it seeds 2× faster, and it was cheaper. A+ is now the default for multi-package milestones.
+
 ### Phase 3 — Autonomy
 Milestones 5–7 (discovery, API, UI). Move to **Approach E** (orchestrator + backlog). Add **Approach D** (red team) as a background loop against parsers and peers. Frontend and backend develop in parallel against the OpenAPI contract.
 

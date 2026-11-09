@@ -1,0 +1,4 @@
+r1: X=A+ Y=A
+r2: X=A Y=A+
+r3: X=A+ Y=A
+r4: X=A Y=A+

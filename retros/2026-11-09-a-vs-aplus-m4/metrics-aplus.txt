@@ -1,0 +1,15 @@
+label=APLUS
+prod_loc=8098
+test_loc=5401
+test_funcs=151
+files=37
+goroutine_sites=18
+mutexes=9
+channels=25
+ctx_params=66
+cyclo_avg=5.2
+cyclo_over15=22
+cyclo_max=45
+coverage_avg=95.2
+race=clean
+staticcheck_issues=1

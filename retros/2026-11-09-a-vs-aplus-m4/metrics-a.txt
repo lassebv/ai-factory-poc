@@ -1,0 +1,21 @@
+label=A
+prod_loc=6899
+test_loc=4811
+find: internal/bt/choke: No such file or directory
+test_funcs=134
+find: internal/bt/choke: No such file or directory
+files=32
+find: internal/bt/choke: No such file or directory
+goroutine_sites=16
+find: internal/bt/choke: No such file or directory
+mutexes=7
+find: internal/bt/choke: No such file or directory
+channels=22
+find: internal/bt/choke: No such file or directory
+ctx_params=45
+cyclo_avg=5.18
+cyclo_over15=18
+cyclo_max=45
+coverage_avg=95.9
+race=clean
+staticcheck_issues=1
