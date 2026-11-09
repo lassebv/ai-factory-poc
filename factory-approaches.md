@@ -202,6 +202,53 @@ spec + harness ──▶ Architect ───────────────
 - **Experiment:** Run A+ on M4, then compare cost, time, hidden-test results and blind-review scores against the M3 baselines for A and C.
 - **How to run:** `harness/prompts/run-fanout.sh` covers the architect phase. A single-implementer phase that reads the architect's plan is still to be added (`run-aplus.sh`).
 
+### Approach A+R — "A+ with a review loop"
+
+**Shape:** A+, plus a quality loop inside the factory. After the implementer finishes, **2 blind reviewers** (using the rubric from the comparisons) and a **red-team agent** examine the result. The red team writes adversarial tests in `harness/redteam/`. Their findings go back to the implementer for **one fix round**, and then the gate runs again.
+
+```
+Architect ─▶ Implementer ─▶ ┌ Reviewer 1 ┐
+                            ├ Reviewer 2 ┼─▶ findings ─▶ Implementer (fix round) ─▶ gate
+                            └ Red team   ┘
+```
+
+- **Why try it:** in the M3 and M4 comparisons, every real quality difference was found **outside** the factory, by holdouts and blind reviews that a human ran afterwards. The reviews were cheap (about $2–3 each) and found real defects. This puts that step inside the factory.
+- **Strengths:**
+  - Quality issues the gate is silent on get fixed before merge.
+  - Red-team tests grow the harness, as a ratchet.
+  - The review cost is small compared with the cost of implementation.
+- **Weaknesses:**
+  - The reviewers are the same model family as the builders, so they share blind spots.
+  - Unverified review claims can send the fix round down false paths: in the comparisons, half the claims weren't reproducible.
+- **Mitigations:**
+  - The fix round must reproduce a finding, with a test, before fixing it. Findings that can't be reproduced get listed, not fixed.
+  - A fresh human-run holdout set stays the final judge.
+- **Experiment:** M5 (with a Sonnet implementer, see A+/S). Compare holdout results and review scores before and after the fix round.
+
+### Approach A+/S — "A+ with a cheaper implementer"
+
+**Shape:** A+, but the architect runs on the strongest model (Opus) and the implementer on a cheaper one (Sonnet).
+
+- **Why try it:** the M4 comparison suggested that A+'s quality came mostly from the architect's contracts and risk review. If that's true, a cheaper implementer should keep most of the quality at a lower cost. At the scale of an organization, the cost per milestone matters.
+- **Strengths:** lower cost and probably faster implementation. It also isolates how much the design contributes compared with the implementer model.
+- **Weaknesses:** a weaker implementer may misread contracts, take shortcuts toward the gate, or struggle with concurrency bugs that the gate doesn't show.
+- **Experiment:** M5 with A+R. Judge the result by the gate, fresh holdouts and blind reviews against the Opus-A+ M4 baseline. For a clean comparison, optionally run an Opus implementer on the **same** architect output.
+
+### Approach V — "Agent-built harness"
+
+**Shape:** a **verifier agent** writes the milestone's harness from the spec: acceptance entries, black-box tests, fakes and oracle scripts. It validates the harness itself: fakes against libtorrent, every check failing for the right reason on the current code, and mutation tests where possible. The human reviews the result instead of writing it.
+
+- **Why try it:** in M1–M4, building and validating the harness was the biggest share of human effort, and the most important one. If the harness can be delegated, the factory scales. If it can't, the human role is "harness author" rather than "reviewer".
+- **Strengths:** frees the scarcest resource, which is senior attention on the harness.
+- **Weaknesses:**
+  - A flawed harness misleads every run that follows.
+  - Agents may write tests that are easy to pass, or that mirror the code they expect.
+- **Mitigations:**
+  - The human writes a small, independent control set of checks, kept hidden from the verifier.
+  - Run mutation tests on the verifier's harness.
+  - Cross-check against the control set after the run.
+- **Experiment:** the M5 (discovery) harness. Compare it with the human control set: what does each catch that the other misses?
+
 ### Approach D — "Adversarial / red-team harness"
 
 **Shape:** Builders on one side. On the other side are attacker agents whose only job is to make the system fail. They write malformed-peer fakes, hostile trackers, path-traversal torrents, DHT floods and kill-9 tests.
@@ -256,6 +303,9 @@ Builder agents ──▶ code ◀── Red-team agents (fuzzers, malicious peer
 | --- | --- | --- | --- | --- | --- |
 | A Single agent | Low | High | Low | Low–medium | How far the harness alone gets you |
 | A+ Architect + single agent | Low | High (contracts too) | Low–medium | Low | Whether up-front contracts and risk review capture C's quality without the fan-out |
+| A+R A+ with a review loop | Low | High | Medium | Low | Whether in-factory reviews and a red team fix what only post-hoc evaluation found |
+| A+/S Cheaper implementer | Low | High | Low–medium | Low | How much quality comes from the design vs the implementer model; cost at scale |
+| V Agent-built harness | — | Delegated | Medium | Review only | Whether harness authorship, the key human task, can be delegated |
 | B Assembly line | Medium | High | Medium | Low | Which roles add value |
 | C Contract fan-out | High | High (contracts too) | Medium | Medium at integration | How good your decomposition and contracts are |
 | D Red team | Medium | Grows the harness itself | Low–medium | Low | Robustness and harness growth |

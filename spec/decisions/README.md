@@ -14,6 +14,7 @@ ADRs record decisions that involve a real trade-off and were made by the human o
 | [0008](0008-nfr-scenarios.md) | NFRs are defined as concrete benchmark scenarios | A13 | Accepted |
 | [0009](0009-quality-gates.md) | Code-quality gates | A14 | Accepted |
 | [0010](0010-schema-evolution.md) | Schema evolution before and after v1 | T7 | Accepted |
+| [0020](0020-m5-discovery-test-hooks.md) | M5 discovery test hooks (`--dht-bootstrap`, `--lsd-addr`) and observable behavior | §4.1, T3 | Accepted |
 | [0016](0016-m4-lifecycle-api-and-test-contract.md) | M4 pulls pause/resume/stop-seeding forward; M4 test contract | §15.4 | Accepted |
 | [0011](0011-m3-download-api-and-frozen-contracts.md) | M3 pulls a minimal add/get API forward; `contract.go` files are frozen | §15.3 | Accepted |
 | [0012](0012-m3-contract-shape-and-piece-order.md) | M3 contract shape; in-order piece selection at M3 | §4.1, A5 | Accepted |

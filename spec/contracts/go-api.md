@@ -116,4 +116,14 @@ Package contracts: in Approach C, each package's frozen interface lives in its `
 | Tracker peers | Dict peer lists may contain IPv6 literals. Bans are per IP (G10). |
 | Package contracts (A+) | `internal/bt/{piece,choke,storage,peer,session}/contract.go`, `internal/store/contract.go`, `internal/api/contract.go` (ADR-0017, 0018, 0019). Shared test helpers: `internal/bt/btest` (goroutine-leak check, in-memory `session.Store`). |
 
+## Milestone 5 additions (ADR-0020)
+
+| Contract | Detail |
+| --- | --- |
+| Flags | `--dht-bootstrap` (replaces the D4 bootstrap list; empty means none), `--lsd-addr ip:port`, `--lsd-interface name`, each with a `TORRENTD_` environment variable |
+| UDP | DHT and UDP trackers share one UDP socket per family, bound to the peer port. UDP tracker packets are sent from the peer port. |
+| Magnets | `POST /api/v1/torrents` with `magnet` → 201, state `metadata` with `hasMetadata: false`, then the metadata is fetched over `ut_metadata` and verified → `checking` → `downloading` |
+| BEP 10 | Reserved bit 20 is set. The extended handshake has `m` (`ut_metadata`, `ut_pex`), `v`, `p`, `reqq=250`, and `metadata_size` when known. |
+| Private | No DHT, PEX or LSD for private torrents, and no `ut_pex` in their handshakes |
+
 Torrent-file parsing is **not** pinned. It is tested black-box through `POST /api/v1/torrents/preview` (see `spec/openapi.yaml`).
