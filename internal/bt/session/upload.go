@@ -205,6 +205,7 @@ func (t *torrent) tick(now time.Time) {
 		p.recvWin, p.sentWin = 0, 0
 	}
 	t.checkTimeouts(now)
+	t.fillAll() // stale requests free pipeline slots over time
 	if now.Sub(t.lastRechoke) >= rechokeInterval {
 		t.rechoke(now)
 	}

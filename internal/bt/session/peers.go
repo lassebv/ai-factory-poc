@@ -18,6 +18,12 @@ const (
 	snubTimeout    = 60 * time.Second
 	maxUpQueue     = 512 // queued requests from one peer
 	maxUpReads     = 4   // block reads in flight for one peer
+	// staleRequest: a request unanswered this long no longer counts
+	// against the pipeline depth, so a peer that ignores some requests
+	// (but answers others) cannot starve the pipeline.
+	staleRequest = 3 * time.Second
+	// maxOutstanding caps live plus stale requests to one peer.
+	maxOutstanding = 2 * piece.MaxPipelineDepth
 )
 
 // peerState is the actor's view of one connected peer.
@@ -43,7 +49,19 @@ type peerState struct {
 	rateDown, rateUp int64 // smoothed bytes/s
 
 	upQueue []piece.Block
+	// reqAt tracks the outstanding requests to the peer.
+	reqAt  map[piece.Block]sentReq
+	reqSeq uint64
 	upReads int
+}
+
+// sentReq is one request sent to a peer. A request is stale (no longer
+// counted against the pipeline depth) after staleRequest, or as soon as the
+// peer answers a later request: peers answer in order, so it was skipped.
+type sentReq struct {
+	at    time.Time
+	seq   uint64
+	stale bool
 }
 
 // wantsPeers reports whether new peers are useful.
@@ -233,6 +251,7 @@ func (t *torrent) message(key piece.PeerKey, m peer.Message) {
 	case peer.MsgChoke:
 		p.choked = true
 		t.picker.Release(key)
+		p.reqAt = nil
 		t.fillAll()
 	case peer.MsgPiece:
 		t.block(p, m)
@@ -283,6 +302,15 @@ func (t *torrent) block(p *peerState, m peer.Message) {
 		t.wasted.Add(n)
 		return
 	}
+	if r, ok := p.reqAt[b]; ok {
+		delete(p.reqAt, b)
+		for k, o := range p.reqAt {
+			if o.seq < r.seq && !o.stale {
+				o.stale = true
+				p.reqAt[k] = o
+			}
+		}
+	}
 	p.waitSince = t.s.clk.Now()
 	p.slow, p.snubbed = false, false
 	idx, begin, data, st := int(m.Index), int(m.Begin), m.Block, t.store
@@ -307,6 +335,7 @@ func (t *torrent) block(p *peerState, m peer.Message) {
 	t.fill(p)
 	for _, o := range cancel {
 		if q := t.peers[o]; q != nil {
+			delete(q.reqAt, b)
 			_ = q.conn.Send(peer.Message{ID: peer.MsgCancel, Index: b.Index, Begin: b.Begin, Length: b.Length})
 			t.fill(q)
 		}
@@ -345,20 +374,38 @@ func (t *torrent) fill(p *peerState) {
 	if p.slow {
 		depth = 1
 	}
-	out := t.picker.Outstanding(p.key)
-	want := depth - out
+	total := t.picker.Outstanding(p.key)
+	now := t.s.clk.Now()
+	out := t.liveRequests(p, now)
+	want := min(depth-out, maxOutstanding-total)
 	if want <= 0 || (out > 0 && want < max(1, depth/8)) {
 		return
 	}
 	bs := t.picker.Pick(p.key, want)
-	if out == 0 && len(bs) > 0 {
-		p.waitSince = t.s.clk.Now()
+	if total == 0 && len(bs) > 0 {
+		p.waitSince = now
+	}
+	if p.reqAt == nil {
+		p.reqAt = map[piece.Block]sentReq{}
 	}
 	for _, b := range bs {
+		p.reqSeq++
+		p.reqAt[b] = sentReq{at: now, seq: p.reqSeq}
 		if err := p.conn.Send(peer.Message{ID: peer.MsgRequest, Index: b.Index, Begin: b.Begin, Length: b.Length}); err != nil {
 			return
 		}
 	}
+}
+
+// liveRequests counts p's requests sent less than staleRequest ago.
+func (t *torrent) liveRequests(p *peerState, now time.Time) int {
+	n := 0
+	for _, r := range p.reqAt {
+		if !r.stale && now.Sub(r.at) < staleRequest {
+			n++
+		}
+	}
+	return n
 }
 
 // checkTimeouts releases the requests of peers that left them unanswered
@@ -377,6 +424,7 @@ func (t *torrent) checkTimeouts(now time.Time) {
 			p.snubbed = true
 		}
 		if waited >= requestTimeout && !p.slow {
+			p.reqAt = nil
 			for _, b := range t.picker.Release(p.key) {
 				_ = p.conn.Send(peer.Message{ID: peer.MsgCancel, Index: b.Index, Begin: b.Begin, Length: b.Length})
 			}

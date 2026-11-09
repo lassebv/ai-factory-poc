@@ -35,6 +35,7 @@
 - **Seeding torrents don't dial out.** On completion, connected seeds are dropped.
 - **Oversize requests** (more than 16 KiB) disconnect the peer; there's no BEP 6 yet. Invalid requests also disconnect. Requests from choked peers are ignored.
 - **Ban side effects:** a ban closes that IP's peers in every torrent and discards in-progress pieces it contributed to. Pieces that are pending hashing still fail and strike.
+- **Stale requests:** a request unanswered for 3 s, or skipped because the peer already answered a later one, no longer counts against the pipeline depth. RES-04 failed about 1 time in 2 under load without this: the fake peer ignores requests for pieces ≥ 32, and random/rarest order clogged the pipeline with dead requests.
 - **Backlog limit:** at most 512 received blocks wait for the disk. Above that, `fill` pauses until the backlog has halved.
 
 ## Status (2026-11-07): milestone 3 (single-peer download), Approach C

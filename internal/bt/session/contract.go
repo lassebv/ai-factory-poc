@@ -29,7 +29,9 @@
 //     being the peer's smoothed download rate. A peer that leaves requests
 //     unanswered for 30 s has them released (and cancelled) and gets a
 //     depth of 1 until it delivers. Endgame duplicates are cancelled when
-//     the block arrives elsewhere. A request for more than 16 KiB closes
+//     the block arrives elsewhere. A request stops counting against the
+//     depth after 3 s, or once a later request to the same peer has been
+//     answered (it was skipped); at most 2*MaxPipelineDepth per peer. A request for more than 16 KiB closes
 //     the connection (no fast extension yet, §16.2 T6).
 //   - Hash failures (G10, ADR-0006): every IP that contributed a block to
 //     a failed piece gets a strike; at 3 strikes the IP is banned for 24 h

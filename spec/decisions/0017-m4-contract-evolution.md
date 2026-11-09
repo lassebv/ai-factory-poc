@@ -29,6 +29,7 @@ The M3 `contract.go` files describe a single-peer leecher. M4 (§15.4, ADR-0016)
   - process-wide disk (4) and hash (GOMAXPROCS/2) pools with non-blocking submit;
   - at most 512 received blocks waiting for the disk, after which the pipeline pauses;
   - request timeout 30 s (release, cancel, then a depth of 1 until the peer delivers);
+  - stale requests: a request stops counting against the pipeline depth after 3 s, or at once when the peer answers a later request (peers answer in order, so it was skipped). It stays owned by that peer, so endgame can still duplicate it. Live plus stale requests are capped at 2 × 250 per peer. Without this, a peer that ignores some requests clogs the pipeline (found by RES-04 under load);
   - snubbing at 60 s;
   - seeding torrents don't dial;
   - a request above 16 KiB closes the connection, because there's no fast extension yet.
