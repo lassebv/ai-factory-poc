@@ -2,246 +2,303 @@ package piece
 
 import (
 	"math/rand/v2"
-	"slices"
+	"net/netip"
+	"time"
+
+	"torrentd/internal/clock"
 )
 
-// Layout geometry.
+// numClasses is the number of priority classes (skip, low, normal, high).
+const numClasses = 4
 
-// PieceSize returns the size of piece i (see Layout); 0 for i out of range.
-func (l Layout) PieceSize(i int) int64 {
-	if i < 0 || i >= l.NumPieces {
-		return 0
-	}
-	if i < l.NumPieces-1 {
-		return l.PieceLength
-	}
-	s := l.TotalLength - int64(l.NumPieces-1)*l.PieceLength
-	if s < 0 {
-		return 0
-	}
-	return s
+// owner is one peer a block is outstanding for.
+type owner struct {
+	peer PeerKey
+	at   time.Time
 }
 
-// NumBlocks returns ceil(PieceSize(i)/BlockSize); 0 for i out of range.
-func (l Layout) NumBlocks(i int) int {
-	return int((l.PieceSize(i) + BlockSize - 1) / BlockSize)
+// blockInfo is the state of one block of a piece.
+type blockInfo struct {
+	received bool
+	// owners are the peers the block is outstanding for (≤ EndgameMaxOwners).
+	owners []owner
+	// released are peers the block was taken back from (late answers are
+	// still accepted from them).
+	released []PeerKey
 }
 
-// blockLen returns the length of block j of piece i.
-func (l Layout) blockLen(i, j int) uint32 {
-	rest := l.PieceSize(i) - int64(j)*BlockSize
-	if rest > BlockSize {
-		return BlockSize
-	}
-	return uint32(rest)
-}
-
-func pipelineDepth(rate int64) int {
-	if rate <= 0 {
-		return MinPipelineDepth
-	}
-	d := rate / BlockSize * 2
-	if r := rate % BlockSize; r != 0 {
-		// rate*2/BlockSize without overflowing for huge rates.
-		d += r * 2 / BlockSize
-	}
-	if d < MinPipelineDepth {
-		return MinPipelineDepth
-	}
-	if d > MaxPipelineDepth {
-		return MaxPipelineDepth
-	}
-	return int(d)
-}
-
-// Picker state.
-
-type pieceState uint8
-
-const (
-	pieceNeeded  pieceState = iota // no block outstanding or received
-	pieceActive                    // in progress: some block outstanding or received
-	piecePending                   // every block received; awaiting the hash result
-	pieceHave                      // verified
-)
-
-type blockState uint8
-
-const (
-	blockNeeded blockState = iota
-	blockOutstanding
-	blockReceived
-)
-
-// pieceInfo is the per-piece bookkeeping. blocks and owner are allocated
-// only while the piece is active or pending.
+// pieceInfo is the state of one piece.
 type pieceInfo struct {
-	state       pieceState
-	avail       int // number of registered peers having the piece
-	outstanding int
-	received    int
-	blocks      []blockState
-	owner       []PeerKey // owner[j] is valid while blocks[j] is outstanding
+	prio    Priority
+	have    bool
+	pending bool
+	avail   int
+	blocks  []blockInfo // nil until the piece is first started
+	nBusy   int         // blocks with at least one owner and not received
+	nRecv   int         // received blocks
+	// exclusive pieces (after a hash failure) are handed to one peer only.
+	exclusive bool
+	exOwner   PeerKey
+	exHeld    bool
+	contrib   []netip.Addr
+	// where records the piece's membership: in the fresh structures or in
+	// the active set of its class.
+	inFresh  bool
+	inActive bool
 }
 
+// peerInfo is the state of one registered peer.
 type peerInfo struct {
-	have        *Bitfield
-	outstanding map[Block]struct{}
+	origin      netip.Addr
+	bf          *Bitfield
+	interest    int // pieces the peer has that are wanted and not have
+	outstanding map[Block]time.Time
+	owned       idxSet // pieces the peer has outstanding or received blocks in
+	cooldown    time.Time
 }
 
+// expiry is one request in the order it was made (for Expire).
+type expiry struct {
+	peer  PeerKey
+	block Block
+	at    time.Time
+}
+
+// picker implements Picker (see contract.go).
 type picker struct {
-	l      Layout
+	l       Layout
+	rnd     *rand.Rand
+	clk     clock.Clock
+	timeout time.Duration
+
 	pieces []pieceInfo
 	peers  map[PeerKey]*peerInfo
 	have   *Bitfield
-	rnd    *rand.Rand // reserved for M4 random-first; unused at M3
+
+	// freshAll[c] holds the fresh (not started, not have, not pending)
+	// pieces of class c; buckets[c][a] those with availability a.
+	freshAll [numClasses]idxSet
+	buckets  [numClasses][]idxSet
+	// active[c] holds the started, not pending, not have pieces of class c.
+	active [numClasses]idxSet
+
+	needed     int // needed blocks of wanted, not-have pieces
+	haveN      int // verified pieces
+	wantedLeft int // wanted pieces that are not have
+
+	queue []expiry
+	qhead int
 }
 
-func newPicker(l Layout, rnd *rand.Rand) Picker {
-	n := max(l.NumPieces, 0)
-	l.NumPieces = n
-	return &picker{
-		l:      l,
-		pieces: make([]pieceInfo, n),
-		peers:  make(map[PeerKey]*peerInfo),
-		have:   NewBitfield(n),
-		rnd:    rnd,
+func newPicker(l Layout, opts Options) Picker {
+	if l.NumPieces < 0 {
+		l.NumPieces = 0
+	}
+	pk := &picker{
+		l:       l,
+		rnd:     opts.Rand,
+		clk:     opts.Clock,
+		timeout: opts.RequestTimeout,
+		pieces:  make([]pieceInfo, l.NumPieces),
+		peers:   map[PeerKey]*peerInfo{},
+		have:    NewBitfield(l.NumPieces),
+	}
+	if pk.rnd == nil {
+		pk.rnd = rand.New(rand.NewPCG(1, 2))
+	}
+	if pk.clk == nil {
+		pk.clk = clock.Real()
+	}
+	if pk.timeout <= 0 {
+		pk.timeout = DefaultRequestTimeout
+	}
+	for i := range pk.pieces {
+		pk.pieces[i].prio = PriorityNormal
+		pk.needed += l.NumBlocks(i)
+		pk.wantedLeft++
+		pk.addFresh(i)
+	}
+	return pk
+}
+
+// wanted reports whether a piece's class is requested at all.
+func wanted(p Priority) bool { return p != PrioritySkip }
+
+// needOf returns the number of needed blocks of piece i.
+func (pk *picker) needOf(i int) int {
+	ps := &pk.pieces[i]
+	if ps.have || ps.pending {
+		return 0
+	}
+	return pk.l.NumBlocks(i) - ps.nBusy - ps.nRecv
+}
+
+// addNeeded adjusts the global needed counter for piece i by d.
+func (pk *picker) addNeeded(i, d int) {
+	if wanted(pk.pieces[i].prio) {
+		pk.needed += d
 	}
 }
 
-func (pk *picker) peer(p PeerKey) *peerInfo {
-	pi := pk.peers[p]
-	if pi == nil {
-		pi = &peerInfo{have: NewBitfield(pk.l.NumPieces), outstanding: make(map[Block]struct{})}
-		pk.peers[p] = pi
+func (pk *picker) bucket(c Priority, a int) *idxSet {
+	for len(pk.buckets[c]) <= a {
+		pk.buckets[c] = append(pk.buckets[c], idxSet{})
 	}
-	return pi
+	return &pk.buckets[c][a]
 }
 
-// AddPeer registers p with no pieces.
-func (pk *picker) AddPeer(p PeerKey) { pk.peer(p) }
+func (pk *picker) addFresh(i int) {
+	ps := &pk.pieces[i]
+	if ps.inFresh {
+		return
+	}
+	ps.inFresh = true
+	pk.freshAll[ps.prio].add(i)
+	pk.bucket(ps.prio, ps.avail).add(i)
+}
 
-// RemovePeer forgets p's availability and releases its outstanding blocks.
+func (pk *picker) removeFresh(i int) {
+	ps := &pk.pieces[i]
+	if !ps.inFresh {
+		return
+	}
+	ps.inFresh = false
+	pk.freshAll[ps.prio].remove(i)
+	pk.bucket(ps.prio, ps.avail).remove(i)
+}
+
+func (pk *picker) addActive(i int) {
+	ps := &pk.pieces[i]
+	if !ps.inActive {
+		ps.inActive = true
+		pk.active[ps.prio].add(i)
+	}
+}
+
+func (pk *picker) removeActive(i int) {
+	ps := &pk.pieces[i]
+	if ps.inActive {
+		ps.inActive = false
+		pk.active[ps.prio].remove(i)
+	}
+}
+
+// settle moves piece i between the fresh and active structures after its
+// block counts changed.
+func (pk *picker) settle(i int) {
+	ps := &pk.pieces[i]
+	switch {
+	case ps.have || ps.pending:
+		pk.removeFresh(i)
+		pk.removeActive(i)
+	case ps.nBusy+ps.nRecv == 0:
+		pk.removeActive(i)
+		pk.addFresh(i)
+	default:
+		pk.removeFresh(i)
+		pk.addActive(i)
+	}
+}
+
+func (pk *picker) setAvail(i, a int) {
+	ps := &pk.pieces[i]
+	if ps.inFresh {
+		pk.bucket(ps.prio, ps.avail).remove(i)
+		pk.bucket(ps.prio, a).add(i)
+	}
+	ps.avail = a
+}
+
+// counts reports whether piece i counts towards a peer's interest.
+func (pk *picker) counts(i int) bool {
+	ps := &pk.pieces[i]
+	return wanted(ps.prio) && !ps.have
+}
+
+// AddPeer registers p.
+func (pk *picker) AddPeer(p PeerKey, origin netip.Addr) {
+	if _, ok := pk.peers[p]; ok {
+		return
+	}
+	pk.peers[p] = &peerInfo{
+		origin:      origin.WithZone(""),
+		bf:          NewBitfield(pk.l.NumPieces),
+		outstanding: map[Block]time.Time{},
+	}
+}
+
+// RemovePeer forgets p.
 func (pk *picker) RemovePeer(p PeerKey) {
 	pi := pk.peers[p]
 	if pi == nil {
 		return
 	}
-	pk.Release(p)
-	for i := range pk.pieces {
-		if pi.have.Has(i) {
-			pk.pieces[i].avail--
+	pk.takeBack(p, pi, false)
+	for i := 0; i < pk.l.NumPieces; i++ {
+		if pi.bf.Has(i) {
+			pk.setAvail(i, pk.pieces[i].avail-1)
 		}
 	}
 	delete(pk.peers, p)
 }
 
-// PeerBitfield replaces p's availability with bf.
+// PeerBitfield replaces p's availability.
 func (pk *picker) PeerBitfield(p PeerKey, bf *Bitfield) {
-	if bf == nil || bf.Len() != pk.l.NumPieces {
-		return
-	}
-	pi := pk.peer(p)
-	for i := range pk.pieces {
-		was, now := pi.have.Has(i), bf.Has(i)
-		switch {
-		case was && !now:
-			pk.pieces[i].avail--
-		case !was && now:
-			pk.pieces[i].avail++
-		}
-	}
-	pi.have = bf.Clone()
-}
-
-// PeerHave adds index to p's availability.
-func (pk *picker) PeerHave(p PeerKey, index int) {
-	if index < 0 || index >= pk.l.NumPieces {
-		return
-	}
-	pi := pk.peer(p)
-	if !pi.have.Has(index) {
-		pi.have.Set(index)
-		pk.pieces[index].avail++
-	}
-}
-
-// Pick returns up to max needed blocks for p (see the Picker doc for the
-// order) and marks them outstanding for p.
-func (pk *picker) Pick(p PeerKey, max int) []Block {
 	pi := pk.peers[p]
-	if pi == nil || max <= 0 {
-		return nil
+	if pi == nil || bf == nil || bf.Len() != pk.l.NumPieces {
+		return
 	}
-	var out []Block
-	// 1. In-progress pieces, lowest index first.
-	for i := range pk.pieces {
-		if len(out) >= max {
-			break
-		}
-		if pk.pieces[i].state == pieceActive && pi.have.Has(i) {
-			out = pk.take(p, pi, i, out, max)
-		}
-	}
-	if len(out) >= max {
-		return out
-	}
-	// 2. New pieces, rarest first, ties by lowest index.
-	var cand []int
-	for i := range pk.pieces {
-		if pk.pieces[i].state == pieceNeeded && pi.have.Has(i) && pk.l.NumBlocks(i) > 0 {
-			cand = append(cand, i)
-		}
-	}
-	slices.SortFunc(cand, func(a, b int) int {
-		if d := pk.pieces[a].avail - pk.pieces[b].avail; d != 0 {
-			return d
-		}
-		return a - b
-	})
-	for _, i := range cand {
-		if len(out) >= max {
-			break
-		}
-		out = pk.take(p, pi, i, out, max)
-	}
-	return out
-}
-
-// take appends needed blocks of piece i to out (up to max), marking them
-// outstanding for p.
-func (pk *picker) take(p PeerKey, pi *peerInfo, i int, out []Block, max int) []Block {
-	ps := &pk.pieces[i]
-	if ps.state == pieceNeeded {
-		pk.activate(i)
-	}
-	if ps.outstanding+ps.received >= len(ps.blocks) {
-		return out
-	}
-	for j := range ps.blocks {
-		if len(out) >= max {
-			break
-		}
-		if ps.blocks[j] != blockNeeded {
+	for i := 0; i < pk.l.NumPieces; i++ {
+		had, has := pi.bf.Has(i), bf.Has(i)
+		if had == has {
 			continue
 		}
-		b := Block{Index: uint32(i), Begin: uint32(j * BlockSize), Length: pk.l.blockLen(i, j)}
-		ps.blocks[j] = blockOutstanding
-		ps.owner[j] = p
-		ps.outstanding++
-		pi.outstanding[b] = struct{}{}
-		out = append(out, b)
+		if has {
+			pk.setAvail(i, pk.pieces[i].avail+1)
+			if pk.counts(i) {
+				pi.interest++
+			}
+		} else {
+			pk.setAvail(i, pk.pieces[i].avail-1)
+			if pk.counts(i) {
+				pi.interest--
+			}
+		}
 	}
-	return out
+	pi.bf = bf.Clone()
 }
 
-func (pk *picker) activate(i int) {
-	ps := &pk.pieces[i]
-	nb := pk.l.NumBlocks(i)
-	ps.state = pieceActive
-	ps.blocks = make([]blockState, nb)
-	ps.owner = make([]PeerKey, nb)
-	ps.outstanding, ps.received = 0, 0
+// PeerHave adds one piece to p's availability.
+func (pk *picker) PeerHave(p PeerKey, index int) {
+	pi := pk.peers[p]
+	if pi == nil || index < 0 || index >= pk.l.NumPieces || pi.bf.Has(index) {
+		return
+	}
+	pi.bf.Set(index)
+	pk.setAvail(index, pk.pieces[index].avail+1)
+	if pk.counts(index) {
+		pi.interest++
+	}
+}
+
+// Interesting reports whether p has a wanted piece we lack.
+func (pk *picker) Interesting(p PeerKey) bool {
+	pi := pk.peers[p]
+	return pi != nil && pi.interest > 0
+}
+
+// IsSeed reports whether p has every piece.
+func (pk *picker) IsSeed(p PeerKey) bool {
+	pi := pk.peers[p]
+	return pi != nil && pi.bf.Full()
+}
+
+// Outstanding returns the number of blocks outstanding for p.
+func (pk *picker) Outstanding(p PeerKey) int {
+	if pi := pk.peers[p]; pi != nil {
+		return len(pi.outstanding)
+	}
+	return 0
 }
 
 // blockIndex validates b against the layout and returns its block number.
@@ -257,106 +314,321 @@ func (pk *picker) blockIndex(b Block) (int, bool) {
 	return j, true
 }
 
-// unown removes block j of piece i from its owner's outstanding set.
-func (pk *picker) unown(i, j int) {
+func (pk *picker) block(i, j int) Block {
+	return Block{Index: uint32(i), Begin: uint32(j * BlockSize), Length: pk.l.blockLen(i, j)}
+}
+
+// dropOwner removes p from the owners of block j of piece i. If remember
+// is set, p is recorded as released (late answers stay acceptable). It
+// keeps the counters consistent.
+func (pk *picker) dropOwner(i, j int, p PeerKey, remember bool) {
 	ps := &pk.pieces[i]
-	if ps.blocks[j] != blockOutstanding {
-		return
+	bi := &ps.blocks[j]
+	for k, o := range bi.owners {
+		if o.peer == p {
+			bi.owners = append(bi.owners[:k], bi.owners[k+1:]...)
+			break
+		}
 	}
-	if op := pk.peers[ps.owner[j]]; op != nil {
-		delete(op.outstanding, Block{Index: uint32(i), Begin: uint32(j * BlockSize), Length: pk.l.blockLen(i, j)})
+	if remember && !containsKey(bi.released, p) {
+		bi.released = append(bi.released, p)
 	}
-	ps.blocks[j] = blockNeeded
-	ps.outstanding--
+	if len(bi.owners) == 0 && !bi.received {
+		ps.nBusy--
+		pk.addNeeded(i, 1)
+	}
+}
+
+// takeBack releases every block outstanding for p.
+func (pk *picker) takeBack(p PeerKey, pi *peerInfo, remember bool) {
+	touched := map[int]bool{}
+	for b := range pi.outstanding {
+		j, _ := pk.blockIndex(b)
+		i := int(b.Index)
+		pk.dropOwner(i, j, p, remember)
+		touched[i] = true
+	}
+	clear(pi.outstanding)
+	for i := range touched {
+		pk.settle(i)
+	}
+	for i := range pk.exclusiveOf(p) {
+		pk.pieces[i].exHeld = false
+	}
+}
+
+// exclusiveOf returns the exclusive pieces held by p (from its owned set).
+func (pk *picker) exclusiveOf(p PeerKey) map[int]bool {
+	out := map[int]bool{}
+	if pi := pk.peers[p]; pi != nil {
+		for _, i := range pi.owned.items {
+			ps := &pk.pieces[i]
+			if ps.exclusive && ps.exHeld && ps.exOwner == p {
+				out[i] = true
+			}
+		}
+	}
+	return out
+}
+
+// Release takes back every block outstanding for p.
+func (pk *picker) Release(p PeerKey) {
+	if pi := pk.peers[p]; pi != nil {
+		pk.takeBack(p, pi, true)
+	}
+}
+
+// Expire takes back blocks outstanding for longer than the timeout.
+func (pk *picker) Expire() []Expired {
+	now := pk.clk.Now()
+	var out []Expired
+	touched := map[int]bool{}
+	for pk.qhead < len(pk.queue) {
+		e := pk.queue[pk.qhead]
+		if now.Sub(e.at) < pk.timeout {
+			break
+		}
+		pk.queue[pk.qhead] = expiry{}
+		pk.qhead++
+		pi := pk.peers[e.peer]
+		if pi == nil {
+			continue
+		}
+		at, ok := pi.outstanding[e.block]
+		if !ok || !at.Equal(e.at) {
+			continue
+		}
+		delete(pi.outstanding, e.block)
+		j, _ := pk.blockIndex(e.block)
+		pk.dropOwner(int(e.block.Index), j, e.peer, true)
+		touched[int(e.block.Index)] = true
+		pi.cooldown = now.Add(pk.timeout)
+		for i := range pk.exclusiveOf(e.peer) {
+			pk.pieces[i].exHeld = false
+		}
+		out = append(out, Expired{Peer: e.peer, Block: e.block})
+	}
+	for i := range touched {
+		pk.settle(i)
+	}
+	if pk.qhead > 1024 && pk.qhead*2 > len(pk.queue) {
+		pk.queue = append(pk.queue[:0], pk.queue[pk.qhead:]...)
+		pk.qhead = 0
+	}
+	return out
 }
 
 // Received records a block from p.
-func (pk *picker) Received(_ PeerKey, b Block) (accepted, pieceDone bool) {
+func (pk *picker) Received(p PeerKey, b Block) Receipt {
+	pi := pk.peers[p]
 	j, ok := pk.blockIndex(b)
-	if !ok {
-		return false, false
+	if pi == nil || !ok {
+		return Receipt{}
 	}
 	i := int(b.Index)
 	ps := &pk.pieces[i]
-	switch ps.state {
-	case pieceHave, piecePending:
-		return false, false
-	case pieceNeeded:
-		pk.activate(i)
+	if ps.have || ps.pending || ps.blocks == nil {
+		return Receipt{}
 	}
-	if ps.blocks[j] == blockReceived {
-		return false, false
+	bi := &ps.blocks[j]
+	if bi.received {
+		return Receipt{}
 	}
-	pk.unown(i, j)
-	ps.blocks[j] = blockReceived
-	ps.received++
-	if ps.received == len(ps.blocks) {
-		ps.state = piecePending
-		return true, true
+	isOwner := false
+	for _, o := range bi.owners {
+		if o.peer == p {
+			isOwner = true
+		}
 	}
-	return true, false
+	if !isOwner && !containsKey(bi.released, p) {
+		return Receipt{}
+	}
+	var r Receipt
+	r.Accepted = true
+	if len(bi.owners) == 0 {
+		pk.addNeeded(i, -1) // it was needed again; now it is received
+	} else {
+		ps.nBusy--
+	}
+	for _, o := range bi.owners {
+		if o.peer != p {
+			r.Cancel = append(r.Cancel, o.peer)
+		}
+		if op := pk.peers[o.peer]; op != nil {
+			delete(op.outstanding, b)
+		}
+	}
+	bi.owners = nil
+	bi.released = nil
+	bi.received = true
+	ps.nRecv++
+	if !containsAddr(ps.contrib, pi.origin) {
+		ps.contrib = append(ps.contrib, pi.origin)
+	}
+	pi.owned.add(i)
+	pi.cooldown = time.Time{}
+	if ps.nRecv == pk.l.NumBlocks(i) {
+		ps.pending = true
+		r.PieceDone = true
+	}
+	pk.settle(i)
+	return r
 }
 
-// Release makes p's outstanding blocks needed again.
-func (pk *picker) Release(p PeerKey) {
-	pi := pk.peers[p]
-	if pi == nil {
+// SetPriority sets the priority class of a piece.
+func (pk *picker) SetPriority(index int, prio Priority) {
+	if index < 0 || index >= pk.l.NumPieces || prio < PrioritySkip || prio > PriorityHigh {
 		return
 	}
-	for b := range pi.outstanding {
-		i, j := int(b.Index), int(b.Begin/BlockSize)
-		pk.unown(i, j)
-		pk.settle(i)
+	ps := &pk.pieces[index]
+	if ps.prio == prio {
+		return
 	}
-	clear(pi.outstanding)
+	wasFresh, wasActive := ps.inFresh, ps.inActive
+	pk.removeFresh(index)
+	pk.removeActive(index)
+	before := pk.counts(index)
+	pk.addNeeded(index, -pk.needOf(index))
+	if wanted(ps.prio) && !ps.have {
+		pk.wantedLeft--
+	}
+	ps.prio = prio
+	pk.addNeeded(index, pk.needOf(index))
+	if wanted(ps.prio) && !ps.have {
+		pk.wantedLeft++
+	}
+	if after := pk.counts(index); after != before {
+		d := 1
+		if !after {
+			d = -1
+		}
+		for _, pi := range pk.peers {
+			if pi.bf.Has(index) {
+				pi.interest += d
+			}
+		}
+	}
+	if wasFresh {
+		pk.addFresh(index)
+	}
+	if wasActive {
+		pk.addActive(index)
+	}
 }
 
-// settle returns an active piece with nothing outstanding or received to
-// the needed state, so that it is ranked as a new piece again.
-func (pk *picker) settle(i int) {
+// resetBlocks forgets every block of piece i (outstanding ones are removed
+// from their peers' sets) and clears its counters.
+func (pk *picker) resetBlocks(i int) {
 	ps := &pk.pieces[i]
-	if ps.state == pieceActive && ps.outstanding == 0 && ps.received == 0 {
-		ps.state = pieceNeeded
-		ps.blocks, ps.owner = nil, nil
+	for j := range ps.blocks {
+		for _, o := range ps.blocks[j].owners {
+			if op := pk.peers[o.peer]; op != nil {
+				delete(op.outstanding, pk.block(i, j))
+			}
+		}
 	}
+	ps.blocks = nil
+	ps.nBusy, ps.nRecv = 0, 0
+	ps.exclusive, ps.exHeld = false, false
+	ps.contrib = nil
 }
 
-// Outstanding returns the number of blocks outstanding for p.
-func (pk *picker) Outstanding(p PeerKey) int {
-	if pi := pk.peers[p]; pi != nil {
-		return len(pi.outstanding)
-	}
-	return 0
-}
-
-// PieceVerified marks piece index as have, whatever its state.
+// PieceVerified marks a piece as have.
 func (pk *picker) PieceVerified(index int) {
 	if index < 0 || index >= pk.l.NumPieces {
 		return
 	}
 	ps := &pk.pieces[index]
-	for j := range ps.blocks {
-		pk.unown(index, j)
-	}
-	ps.state = pieceHave
-	ps.blocks, ps.owner = nil, nil
-	ps.outstanding, ps.received = 0, 0
-	pk.have.Set(index)
-}
-
-// PieceFailed makes every block of a pending piece needed again.
-func (pk *picker) PieceFailed(index int) {
-	if index < 0 || index >= pk.l.NumPieces || pk.pieces[index].state != piecePending {
+	if ps.have {
 		return
 	}
+	pk.addNeeded(index, -pk.needOf(index))
+	if wanted(ps.prio) {
+		pk.wantedLeft--
+		for _, pi := range pk.peers {
+			if pi.bf.Has(index) {
+				pi.interest--
+			}
+		}
+	}
+	pk.resetBlocks(index)
+	ps.have, ps.pending = true, false
+	pk.have.Set(index)
+	pk.haveN++
+	pk.settle(index)
+}
+
+// PieceFailed makes a pending piece needed again and returns its
+// contributors.
+func (pk *picker) PieceFailed(index int) []netip.Addr {
+	if index < 0 || index >= pk.l.NumPieces || !pk.pieces[index].pending {
+		return nil
+	}
 	ps := &pk.pieces[index]
-	ps.state = pieceNeeded
-	ps.blocks, ps.owner = nil, nil
-	ps.outstanding, ps.received = 0, 0
+	contrib := ps.contrib
+	pk.resetBlocks(index)
+	ps.pending = false
+	ps.exclusive = true
+	pk.addNeeded(index, pk.needOf(index))
+	for _, pi := range pk.peers {
+		pi.owned.remove(index)
+	}
+	pk.settle(index)
+	return contrib
 }
 
 // Have returns a copy of the verified pieces.
 func (pk *picker) Have() *Bitfield { return pk.have.Clone() }
 
-// Done reports whether every piece is have.
-func (pk *picker) Done() bool { return pk.have.Full() }
+// Done reports whether every wanted piece is have.
+func (pk *picker) Done() bool { return pk.wantedLeft == 0 }
+
+// Endgame reports whether every remaining block has been requested.
+func (pk *picker) Endgame() bool { return pk.needed == 0 && pk.wantedLeft > 0 }
+
+func containsKey(s []PeerKey, p PeerKey) bool {
+	for _, x := range s {
+		if x == p {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAddr(s []netip.Addr, a netip.Addr) bool {
+	for _, x := range s {
+		if x == a {
+			return true
+		}
+	}
+	return false
+}
+
+// idxSet is a set of ints with O(1) add, remove and random access.
+type idxSet struct {
+	items []int
+	pos   map[int]int
+}
+
+func (s *idxSet) add(i int) {
+	if s.pos == nil {
+		s.pos = map[int]int{}
+	}
+	if _, ok := s.pos[i]; ok {
+		return
+	}
+	s.pos[i] = len(s.items)
+	s.items = append(s.items, i)
+}
+
+func (s *idxSet) remove(i int) {
+	k, ok := s.pos[i]
+	if !ok {
+		return
+	}
+	last := len(s.items) - 1
+	s.items[k] = s.items[last]
+	s.pos[s.items[k]] = k
+	s.items = s.items[:last]
+	delete(s.pos, i)
+}

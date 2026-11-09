@@ -74,14 +74,21 @@ func defaultDownloadDir(ctx context.Context, st settings, log *slog.Logger) stri
 	return filepath.Join(home, "Downloads")
 }
 
-// startEngine creates the session (§6.1 steps 3 and 4).
-func startEngine(ctx context.Context, cfg config.Config, st settings, log *slog.Logger) (session.Session, error) {
-	sess, err := session.New(session.Config{
+// startEngine creates the session (§6.1 steps 3 and 4): it restores the
+// persisted torrents from ps (nil means no persistence) with the fast-resume
+// rules selected by previousClean (C3).
+func startEngine(ctx context.Context, cfg config.Config, st settings, ps session.Store, previousClean bool, log *slog.Logger) (session.Session, error) {
+	sc := session.Config{
 		PeerPort:           peerPort(ctx, cfg, st, log),
 		DefaultDownloadDir: defaultDownloadDir(ctx, st, log),
 		Clock:              clock.Real(),
 		Logger:             log,
-	})
+		PreviousClean:      previousClean,
+	}
+	if ps != nil {
+		sc.Store = ps
+	}
+	sess, err := session.New(sc)
 	if err != nil {
 		return nil, err
 	}

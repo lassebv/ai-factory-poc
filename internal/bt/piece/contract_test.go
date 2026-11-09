@@ -1,12 +1,18 @@
 package piece
 
-// FROZEN CONTRACT TESTS (ADR-0011). Owned by the architect. Every correct
+// FROZEN CONTRACT TESTS (ADR-0011, ADR-0018). Owned by the architect. Every correct
 // implementation of contract.go must pass these.
 
 import (
 	"bytes"
 	"errors"
+	"math/rand/v2"
+	"net/netip"
+	"slices"
 	"testing"
+	"time"
+
+	"torrentd/internal/clock"
 )
 
 func TestContractBitfieldBasics(t *testing.T) {
@@ -111,12 +117,27 @@ func full(n int) *Bitfield {
 	return b
 }
 
+func ip(n byte) netip.Addr { return netip.AddrFrom4([4]byte{10, 0, 0, n}) }
+
+var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// newPK returns a deterministic picker on a fake clock.
+func newPK(l Layout, seed uint64) (Picker, *clock.Fake) {
+	clk := clock.NewFake(t0)
+	return New(l, Options{Rand: rand.New(rand.NewPCG(seed, 7)), Clock: clk}), clk
+}
+
+// lay returns a layout of n pieces of blocks*BlockSize bytes.
+func lay(n, blocks int) Layout {
+	return Layout{NumPieces: n, PieceLength: int64(blocks * BlockSize), TotalLength: int64(n * blocks * BlockSize)}
+}
+
 // drain picks and receives every block from p until nothing is left,
 // verifying each completed piece, and returns the blocks in pick order.
 func drain(t *testing.T, pk Picker, p PeerKey, batch int) []Block {
 	t.Helper()
 	var all []Block
-	for i := 0; i < 100000; i++ {
+	for i := 0; i < 1<<20; i++ {
 		bs := pk.Pick(p, batch)
 		if len(bs) == 0 {
 			return all
@@ -126,11 +147,11 @@ func drain(t *testing.T, pk Picker, p PeerKey, batch int) []Block {
 		}
 		for _, b := range bs {
 			all = append(all, b)
-			ok, done := pk.Received(p, b)
-			if !ok {
-				t.Fatalf("Received(%+v) was not accepted", b)
+			r := pk.Received(p, b)
+			if !r.Accepted {
+				t.Fatalf("Received(%+v) from the peer it was requested from was not accepted", b)
 			}
-			if done {
+			if r.PieceDone {
 				pk.PieceVerified(int(b.Index))
 			}
 		}
@@ -140,209 +161,375 @@ func drain(t *testing.T, pk Picker, p PeerKey, batch int) []Block {
 }
 
 func TestContractPickerCoversEveryBlockExactlyOnce(t *testing.T) {
-	l := Layout{NumPieces: 5, PieceLength: 65536, TotalLength: 65536*4 + 20000}
-	pk := NewPicker(l, nil)
-	pk.PeerBitfield(1, full(5))
-	blocks := drain(t, pk, 1, 7)
+	// 10 pieces of 2.5 blocks, the last one short.
+	l := Layout{NumPieces: 10, PieceLength: 40960, TotalLength: 9*40960 + 20000}
+	pk, _ := newPK(l, 1)
+	pk.AddPeer(1, ip(1))
+	pk.PeerBitfield(1, full(10))
 	seen := map[Block]bool{}
-	var total int64
-	for _, b := range blocks {
+	for _, b := range drain(t, pk, 1, 7) {
 		if seen[b] {
-			t.Fatalf("block %+v picked twice", b)
+			t.Fatalf("block %+v handed out twice to the same peer", b)
 		}
 		seen[b] = true
 		if b.Begin%BlockSize != 0 || int64(b.Begin)+int64(b.Length) > l.PieceSize(int(b.Index)) {
-			t.Fatalf("block %+v crosses the piece end or is misaligned", b)
-		}
-		last := int64(b.Begin)+int64(b.Length) == l.PieceSize(int(b.Index))
-		if b.Length != BlockSize && !last {
-			t.Fatalf("block %+v: only the last block of a piece may be short", b)
-		}
-		total += int64(b.Length)
-	}
-	if total != l.TotalLength {
-		t.Fatalf("picked %d bytes, want %d", total, l.TotalLength)
-	}
-	if !pk.Done() || !pk.Have().Full() {
-		t.Fatal("picker should be done after every piece verified")
-	}
-	if pk.Pick(1, 10) != nil {
-		t.Fatal("Pick after Done must return nil")
-	}
-}
-
-func TestContractPickerInOrderForSinglePeer(t *testing.T) {
-	// ADR-0012: in-progress pieces first, then lowest index among equally
-	// rare pieces. TestPartFiles (STOR-02) depends on this.
-	l := Layout{NumPieces: 6, PieceLength: 32768, TotalLength: 6 * 32768}
-	pk := NewPicker(l, nil)
-	pk.PeerBitfield(7, full(6))
-	got := pk.Pick(7, 5)
-	want := []Block{{0, 0, BlockSize}, {0, BlockSize, BlockSize}, {1, 0, BlockSize}, {1, BlockSize, BlockSize}, {2, 0, BlockSize}}
-	if len(got) != len(want) {
-		t.Fatalf("Pick = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Pick = %v, want %v", got, want)
+			t.Fatalf("block %+v is not a layout block", b)
 		}
 	}
-	if pk.Outstanding(7) != 5 {
-		t.Fatalf("Outstanding = %d, want 5", pk.Outstanding(7))
+	want := 0
+	for i := 0; i < 10; i++ {
+		want += l.NumBlocks(i)
 	}
-	// The in-progress piece 2 is finished before piece 3 starts.
-	if next := pk.Pick(7, 2); len(next) != 2 || next[0] != (Block{2, BlockSize, BlockSize}) || next[1].Index != 3 {
-		t.Fatalf("second Pick = %v, want piece 2's second block then piece 3", next)
+	if len(seen) != want || !pk.Done() || pk.Have().Count() != 10 {
+		t.Fatalf("got %d blocks (want %d), done=%v", len(seen), want, pk.Done())
 	}
 }
 
 func TestContractPickerRespectsAvailability(t *testing.T) {
-	l := Layout{NumPieces: 4, PieceLength: 16384, TotalLength: 4 * 16384}
-	pk := NewPicker(l, nil)
-	pk.AddPeer(1)
-	if bs := pk.Pick(1, 10); len(bs) != 0 {
-		t.Fatalf("a peer with no pieces got %v", bs)
+	pk, _ := newPK(lay(8, 2), 1)
+	pk.AddPeer(1, ip(1))
+	if pk.Pick(1, 10) != nil || pk.Interesting(1) {
+		t.Fatal("a peer with no pieces must get nothing and not be interesting")
 	}
-	pk.PeerHave(1, 2)
+	pk.PeerHave(1, 5)
 	pk.PeerHave(1, 99) // ignored
-	bs := pk.Pick(1, 10)
-	if len(bs) != 1 || bs[0].Index != 2 {
-		t.Fatalf("Pick = %v, want only piece 2", bs)
+	if !pk.Interesting(1) {
+		t.Fatal("peer with piece 5 must be interesting")
 	}
-	// A second peer must not get the outstanding block (no endgame at M3).
-	pk.PeerBitfield(2, full(4))
-	for _, b := range pk.Pick(2, 10) {
-		if b.Index == 2 {
-			t.Fatalf("block %+v handed out twice", b)
+	for _, b := range pk.Pick(1, 10) {
+		if b.Index != 5 {
+			t.Fatalf("picked %+v from a peer that only has piece 5", b)
+		}
+	}
+	pk.PeerBitfield(1, NewBitfield(7)) // wrong length: ignored
+	if !pk.Interesting(1) {
+		t.Fatal("a bitfield of the wrong length must be ignored")
+	}
+	pk.PeerBitfield(2, full(8)) // unregistered: ignored
+	if pk.Pick(2, 10) != nil {
+		t.Fatal("unregistered peers get nothing")
+	}
+	pk.AddPeer(2, ip(2))
+	pk.PeerBitfield(2, full(8))
+	if !pk.IsSeed(2) || pk.IsSeed(1) {
+		t.Fatal("IsSeed wrong")
+	}
+	for i := 0; i < 8; i++ {
+		pk.PieceVerified(i)
+	}
+	if pk.Interesting(2) || !pk.Done() {
+		t.Fatal("nothing is interesting once every piece is have")
+	}
+}
+
+func TestContractPickerRarestFirstAfterRandomFirst(t *testing.T) {
+	// 48 one-block pieces: A has all, B and C only 0-23 (PICK-01 shape).
+	l := lay(48, 1)
+	pk, _ := newPK(l, 3)
+	common := NewBitfield(48)
+	for i := 0; i < 24; i++ {
+		common.Set(i)
+	}
+	pk.AddPeer(1, ip(1))
+	pk.PeerBitfield(1, full(48))
+	for _, p := range []PeerKey{2, 3} {
+		pk.AddPeer(p, ip(byte(p)))
+		pk.PeerBitfield(p, common)
+	}
+	for i := 0; i < RandomFirstPieces; i++ {
+		pk.PieceVerified(i)
+	}
+	got := pk.Pick(1, 16)
+	if len(got) != 16 {
+		t.Fatalf("picked %d blocks, want 16", len(got))
+	}
+	for _, b := range got {
+		if b.Index < 24 {
+			t.Fatalf("picked common piece %d from the only holder of the rare pieces: %v", b.Index, got)
+		}
+	}
+	for _, b := range pk.Pick(2, 50) {
+		if b.Index >= 24 {
+			t.Fatalf("peer 2 asked for piece %d it does not have", b.Index)
 		}
 	}
 }
 
-func TestContractPickerRarestFirst(t *testing.T) {
-	l := Layout{NumPieces: 4, PieceLength: 16384, TotalLength: 4 * 16384}
-	pk := NewPicker(l, nil)
-	pk.PeerBitfield(1, full(4))
-	pk.PeerBitfield(2, full(4))
-	only3 := NewBitfield(4)
-	only3.Set(3)
-	pk.PeerBitfield(3, only3)
-	pk.PeerHave(2, 0)
-	// Availability: piece 0,1,2 = 2 peers, piece 3 = 3 peers... make piece 1
-	// rarest by removing peer 2 and re-adding it without piece 1.
-	pk.RemovePeer(2)
-	no1 := full(4)
-	no1.Clear(1)
-	pk.PeerBitfield(2, no1)
-	// Now: piece 0: 2, piece 1: 1, piece 2: 2, piece 3: 3.
-	bs := pk.Pick(1, 1)
-	if len(bs) != 1 || bs[0].Index != 1 {
-		t.Fatalf("Pick = %v, want the rarest piece 1", bs)
+func TestContractPickerRandomFirstUsesRand(t *testing.T) {
+	first := map[uint32]bool{}
+	for seed := uint64(0); seed < 16; seed++ {
+		pk, _ := newPK(lay(64, 1), seed)
+		pk.AddPeer(1, ip(1))
+		pk.PeerBitfield(1, full(64))
+		first[pk.Pick(1, 1)[0].Index] = true
 	}
-	bs = pk.Pick(1, 3)
-	if len(bs) != 3 || bs[0].Index != 0 || bs[1].Index != 2 || bs[2].Index != 3 {
-		t.Fatalf("Pick = %v, want pieces 0, 2 (ties by index), then 3", bs)
+	if len(first) < 4 {
+		t.Fatalf("with no piece verified the first piece must be random; 16 seeds gave only %v", first)
+	}
+	// Same seed, same choices (T2).
+	a, _ := newPK(lay(64, 1), 9)
+	b, _ := newPK(lay(64, 1), 9)
+	for _, pk := range []Picker{a, b} {
+		pk.AddPeer(1, ip(1))
+		pk.PeerBitfield(1, full(64))
+	}
+	if !slices.Equal(a.Pick(1, 8), b.Pick(1, 8)) {
+		t.Fatal("the picker must be deterministic for a given Rand")
 	}
 }
 
-func TestContractPickerReleaseAndRemove(t *testing.T) {
-	l := Layout{NumPieces: 2, PieceLength: 32768, TotalLength: 65536}
-	pk := NewPicker(l, nil)
-	pk.PeerBitfield(1, full(2))
-	pk.PeerBitfield(2, full(2))
-	a := pk.Pick(1, 4)
-	if len(a) != 4 || len(pk.Pick(2, 4)) != 0 {
-		t.Fatalf("peer 1 should hold all 4 blocks, got %v", a)
+func TestContractPickerPriorities(t *testing.T) {
+	pk, _ := newPK(lay(10, 1), 1)
+	pk.AddPeer(1, ip(1))
+	pk.PeerBitfield(1, full(10))
+	pk.SetPriority(7, PriorityHigh)
+	pk.SetPriority(3, PrioritySkip)
+	pk.SetPriority(0, PriorityLow)
+	pk.SetPriority(99, PriorityHigh) // ignored
+	got := pk.Pick(1, 10)
+	if len(got) != 9 || got[0].Index != 7 || got[8].Index != 0 {
+		t.Fatalf("pick order %v: want high piece 7 first, low piece 0 last, skip piece 3 absent", got)
 	}
+	for _, b := range got {
+		if b.Index == 3 {
+			t.Fatal("a skip piece was requested")
+		}
+		pk.Received(1, b)
+		pk.PieceVerified(int(b.Index))
+	}
+	if !pk.Done() || pk.Have().Has(3) {
+		t.Fatal("Done must ignore skip pieces")
+	}
+}
+
+func TestContractPickerOwnership(t *testing.T) {
+	pk, _ := newPK(lay(4, 2), 1)
+	for _, p := range []PeerKey{1, 2} {
+		pk.AddPeer(p, ip(byte(p)))
+		pk.PeerBitfield(p, full(4))
+	}
+	bs := pk.Pick(1, 1)
+	if len(bs) != 1 {
+		t.Fatal("no block picked")
+	}
+	b := bs[0]
+	other := Block{Index: (b.Index + 1) % 4, Begin: 0, Length: BlockSize}
+	if r := pk.Received(1, other); r.Accepted {
+		t.Fatal("an unrequested block was accepted (POISON-01)")
+	}
+	if r := pk.Received(2, b); r.Accepted {
+		t.Fatal("a block requested from peer 1 was accepted from peer 2")
+	}
+	if r := pk.Received(1, Block{Index: b.Index, Begin: b.Begin, Length: b.Length - 1}); r.Accepted {
+		t.Fatal("a block of the wrong length was accepted")
+	}
+	if r := pk.Received(1, b); !r.Accepted || r.PieceDone {
+		t.Fatalf("requested block: %+v", r)
+	}
+	if r := pk.Received(1, b); r.Accepted {
+		t.Fatal("a duplicate block was accepted")
+	}
+	// Late answer after Release is still accepted.
+	b2 := pk.Pick(1, 1)
 	pk.Release(1)
 	if pk.Outstanding(1) != 0 {
-		t.Fatal("Release must clear outstanding")
+		t.Fatal("Release must take back every outstanding block")
 	}
-	b := pk.Pick(2, 4)
-	if len(b) != 4 {
-		t.Fatalf("released blocks should go to peer 2, got %v", b)
+	if r := pk.Received(1, b2[0]); !r.Accepted {
+		t.Fatal("a late block after Release, still needed, must be accepted")
 	}
-	pk.RemovePeer(2)
-	if pk.Outstanding(2) != 0 {
-		t.Fatal("RemovePeer must clear outstanding")
-	}
-	c := pk.Pick(1, 4) // availability of peer 1 survived Release
-	if len(c) != 4 {
-		t.Fatalf("after RemovePeer(2), peer 1 should get the blocks back, got %v", c)
-	}
-	pk.RemovePeer(42) // unknown: no panic
 }
 
-func TestContractPickerReceivedRules(t *testing.T) {
-	l := Layout{NumPieces: 2, PieceLength: 32768, TotalLength: 32768 + 100}
-	pk := NewPicker(l, nil)
-	pk.PeerBitfield(1, full(2))
-	bs := pk.Pick(1, 3)
-	if len(bs) != 3 || bs[2] != (Block{1, 0, 100}) {
-		t.Fatalf("Pick = %v, want two blocks of piece 0 and the 100-byte block of piece 1", bs)
+func TestContractPickerPieceAffinity(t *testing.T) {
+	pk, _ := newPK(lay(8, 4), 1)
+	for _, p := range []PeerKey{1, 2} {
+		pk.AddPeer(p, ip(byte(p)))
+		pk.PeerBitfield(p, full(8))
 	}
-	for _, bad := range []Block{{0, 1, BlockSize}, {0, 0, 100}, {5, 0, BlockSize}, {1, 0, BlockSize}} {
-		if ok, _ := pk.Received(1, bad); ok {
-			t.Errorf("Received(%+v) accepted a block that is not in the layout", bad)
+	a := pk.Pick(1, 2)
+	bs := pk.Pick(2, 4)
+	for _, b := range bs {
+		if b.Index == a[0].Index {
+			t.Fatalf("peer 2 got blocks of piece %d that peer 1 started while fresh pieces exist", b.Index)
 		}
 	}
-	if ok, done := pk.Received(1, bs[0]); !ok || done {
-		t.Fatalf("first block: accepted=%v done=%v, want true false", ok, done)
+	more := pk.Pick(1, 2)
+	if len(more) != 2 || more[0].Index != a[0].Index {
+		t.Fatalf("peer 1 must finish its own piece %d first, got %v", a[0].Index, more)
 	}
-	if ok, _ := pk.Received(1, bs[0]); ok {
-		t.Fatal("a duplicate block must not be accepted")
+}
+
+func TestContractPickerEndgame(t *testing.T) {
+	pk, _ := newPK(lay(4, 1), 1)
+	for _, p := range []PeerKey{1, 2, 3, 4, 5} {
+		pk.AddPeer(p, ip(byte(p)))
+		pk.PeerBitfield(p, full(4))
 	}
-	// A block from a peer it was not requested from is still useful.
-	if ok, done := pk.Received(2, bs[1]); !ok || !done {
-		t.Fatalf("second block via another peer: accepted=%v done=%v, want true true", ok, done)
+	if pk.Endgame() {
+		t.Fatal("endgame before anything was requested")
 	}
-	if pk.Outstanding(1) != 1 {
-		t.Fatalf("Outstanding = %d, want 1 (only piece 1's block)", pk.Outstanding(1))
+	held := pk.Pick(1, 10)
+	if len(held) != 4 || !pk.Endgame() {
+		t.Fatalf("peer 1 holds %d blocks, endgame=%v; want 4, true", len(held), pk.Endgame())
 	}
-	// Pending piece 0 is not handed out again.
-	for _, b := range pk.Pick(1, 10) {
-		if b.Index == 0 {
-			t.Fatalf("pending piece picked again: %+v", b)
+	dup := pk.Pick(2, 10)
+	if len(dup) != 4 {
+		t.Fatalf("endgame must hand the remaining blocks to another peer, got %v", dup)
+	}
+	if again := pk.Pick(2, 10); len(again) != 0 {
+		t.Fatalf("a block must never be outstanding twice for the same peer: %v", again)
+	}
+	pk.Pick(3, 10)
+	if extra := pk.Pick(4, 10); len(extra) != 0 {
+		t.Fatalf("blocks outstanding for more than EndgameMaxOwners=%d peers: %v", EndgameMaxOwners, extra)
+	}
+	r := pk.Received(2, dup[0])
+	if !r.Accepted || !r.PieceDone {
+		t.Fatalf("receipt %+v", r)
+	}
+	slices.Sort(r.Cancel)
+	if !slices.Equal(r.Cancel, []PeerKey{1, 3}) {
+		t.Fatalf("Cancel = %v, want the other owners [1 3]", r.Cancel)
+	}
+	if pk.Outstanding(1) != 3 || pk.Outstanding(3) != 3 {
+		t.Fatal("the cancelled block must leave the other peers' outstanding sets")
+	}
+	if r := pk.Received(1, dup[0]); r.Accepted {
+		t.Fatal("the losing endgame duplicate must be rejected (wasted)")
+	}
+}
+
+func TestContractPickerExpire(t *testing.T) {
+	pk, clk := newPK(lay(8, 1), 1)
+	for _, p := range []PeerKey{1, 2} {
+		pk.AddPeer(p, ip(byte(p)))
+		pk.PeerBitfield(p, full(8))
+	}
+	held := pk.Pick(1, 4)
+	clk.Advance(DefaultRequestTimeout - time.Second)
+	if e := pk.Expire(); len(e) != 0 {
+		t.Fatalf("expired too early: %v", e)
+	}
+	clk.Advance(time.Second)
+	e := pk.Expire()
+	if len(e) != 4 || pk.Outstanding(1) != 0 {
+		t.Fatalf("Expire returned %v, outstanding %d; want the 4 blocks of peer 1", e, pk.Outstanding(1))
+	}
+	for _, x := range e {
+		if x.Peer != 1 {
+			t.Fatalf("expired %+v", x)
 		}
 	}
-	if ok, _ := pk.Received(1, bs[0]); ok {
-		t.Fatal("a block of a pending piece must not be accepted")
+	if bs := pk.Pick(1, 10); len(bs) != 0 {
+		t.Fatalf("a peer that just stalled must not get new blocks: %v", bs)
 	}
-	pk.PieceFailed(0)
-	again := pk.Pick(1, 10)
-	if len(again) != 2 || again[0].Index != 0 || again[1].Index != 0 {
-		t.Fatalf("after PieceFailed, piece 0's blocks should be needed again, got %v", again)
+	got := pk.Pick(2, 10)
+	if len(got) != 8 {
+		t.Fatalf("the expired blocks must be requestable from another peer: %v", got)
 	}
-	for _, b := range again {
-		pk.Received(1, b)
+	// Peer 1 answers late: accepted, and peer 2 is told to cancel.
+	r := pk.Received(1, held[0])
+	if !r.Accepted || !slices.Equal(r.Cancel, []PeerKey{2}) {
+		t.Fatalf("late answer: %+v", r)
 	}
-	pk.PieceVerified(0)
-	if !pk.Have().Has(0) || pk.Done() {
-		t.Fatal("piece 0 verified, piece 1 not yet")
+}
+
+func TestContractPickerRemovePeerFreesBlocks(t *testing.T) {
+	pk, _ := newPK(lay(2, 2), 1)
+	for _, p := range []PeerKey{1, 2} {
+		pk.AddPeer(p, ip(byte(p)))
+		pk.PeerBitfield(p, full(2))
 	}
-	if ok, _ := pk.Received(1, Block{0, 0, BlockSize}); ok {
-		t.Fatal("a block of a verified piece must not be accepted")
+	pk.Pick(1, 4)
+	pk.RemovePeer(1)
+	if got := pk.Pick(2, 10); len(got) != 4 {
+		t.Fatalf("blocks of a removed peer must be needed again, got %v", got)
 	}
-	if ok, done := pk.Received(1, bs[2]); !ok || !done {
-		t.Fatal("piece 1's single block should complete it")
+	if pk.Pick(1, 1) != nil || pk.Outstanding(1) != 0 {
+		t.Fatal("a removed peer gets nothing")
 	}
-	pk.PieceVerified(1)
-	if !pk.Done() {
-		t.Fatal("all pieces verified")
+}
+
+func TestContractPickerFailureContributors(t *testing.T) {
+	pk, _ := newPK(lay(1, 2), 1)
+	pk.AddPeer(1, ip(1))
+	pk.AddPeer(2, ip(2))
+	pk.AddPeer(3, ip(1)) // second connection from the same IP
+	for _, p := range []PeerKey{1, 2, 3} {
+		pk.PeerBitfield(p, full(1))
+	}
+	a := pk.Pick(1, 1)
+	b := pk.Pick(2, 1) // rule 4: the only piece is started by peer 1
+	if len(a) != 1 || len(b) != 1 || a[0] == b[0] {
+		t.Fatalf("picks %v %v", a, b)
+	}
+	pk.Received(1, a[0])
+	pk.RemovePeer(1) // contributions survive disconnect
+	if r := pk.Received(2, b[0]); !r.PieceDone {
+		t.Fatal("piece not done")
+	}
+	got := pk.PieceFailed(0)
+	slices.SortFunc(got, func(x, y netip.Addr) int { return x.Compare(y) })
+	if !slices.Equal(got, []netip.Addr{ip(1), ip(2)}) {
+		t.Fatalf("contributors = %v, want [10.0.0.1 10.0.0.2]", got)
+	}
+	// Single-source retry: the first picker takes the whole piece.
+	if bs := pk.Pick(3, 10); len(bs) != 2 {
+		t.Fatalf("retry pick %v, want both blocks", bs)
+	}
+	if bs := pk.Pick(2, 10); len(bs) != 0 {
+		t.Fatalf("an exclusive (failed) piece was shared with a second peer: %v", bs)
+	}
+	if again := pk.PieceFailed(0); again != nil {
+		t.Fatal("PieceFailed on a piece that is not pending must be ignored")
 	}
 }
 
 func TestContractPickerPieceVerifiedUpfront(t *testing.T) {
-	l := Layout{NumPieces: 3, PieceLength: 16384, TotalLength: 3 * 16384}
-	pk := NewPicker(l, nil)
-	pk.PieceVerified(0) // e.g. found during checking
-	pk.PieceVerified(7) // out of range: ignored
-	pk.PeerBitfield(1, full(3))
-	bs := pk.Pick(1, 10)
-	if len(bs) != 2 || bs[0].Index != 1 || bs[1].Index != 2 {
-		t.Fatalf("Pick = %v, want pieces 1 and 2", bs)
+	pk, _ := newPK(lay(4, 2), 1)
+	pk.PieceVerified(1)
+	pk.PieceVerified(3)
+	pk.AddPeer(1, ip(1))
+	pk.PeerBitfield(1, full(4))
+	for _, b := range drain(t, pk, 1, 3) {
+		if b.Index == 1 || b.Index == 3 {
+			t.Fatalf("requested verified piece %d", b.Index)
+		}
 	}
-	pk.PeerBitfield(9, NewBitfield(5)) // wrong length: ignored, no panic
-	if n := pk.Have().Count(); n != 1 {
-		t.Fatalf("Have().Count() = %d, want 1", n)
+	if !pk.Done() {
+		t.Fatal("not done")
+	}
+}
+
+// TestContractPickerCost guards against per-call scans of every piece
+// (CPU-01): downloading 8x more pieces must cost well under 64x more.
+func TestContractPickerCost(t *testing.T) {
+	run := func(n int) time.Duration {
+		best := time.Duration(1 << 62)
+		for rep := 0; rep < 3; rep++ {
+			pk, _ := newPK(lay(n, 1), 1)
+			for p := PeerKey(1); p <= 4; p++ {
+				pk.AddPeer(p, ip(byte(p)))
+				pk.PeerBitfield(p, full(n))
+			}
+			start := time.Now()
+			for left := n; left > 0; {
+				for p := PeerKey(1); p <= 4; p++ {
+					for _, b := range pk.Pick(p, 16) {
+						if pk.Received(p, b).PieceDone {
+							pk.PieceVerified(int(b.Index))
+							left--
+						}
+					}
+				}
+			}
+			best = min(best, time.Since(start))
+		}
+		return best
+	}
+	small, large := run(2048), run(16384)
+	t.Logf("2048 pieces: %v, 16384 pieces: %v", small, large)
+	if large > 24*small+50*time.Millisecond {
+		t.Errorf("8x the pieces took %.1fx the time; the picker scans every piece per call", float64(large)/float64(small))
 	}
 }

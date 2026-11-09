@@ -3,22 +3,22 @@ package storage
 import (
 	"bytes"
 	"container/list"
+	"context"
 	"crypto/sha1"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 
 	"torrentd/internal/bt/metainfo"
 )
 
-// verifyChunk is the read size VerifyPiece uses, so that hashing a 256 MiB
-// piece does not need a 256 MiB buffer.
-const verifyChunk = 1 << 20
+// verifyChunk is the read size VerifyPiece uses, so that hashing a large
+// piece does not need a piece-sized buffer (MEM-01).
+const verifyChunk = MaxHashBuffer
 
 // file is the on-disk state of one entry of info.Files.
 type file struct {
@@ -47,8 +47,11 @@ type storage struct {
 	// ends[i] = files[i].offset + files[i].length, for binary search.
 	ends []int64
 
-	disk chan struct{} // DiskWorkers semaphore
-	hash chan struct{} // HashWorkers semaphore
+	pools   *Pools
+	private bool // pools are owned (and closed) by this storage
+	// ctx is cancelled by Close so that queued pool work is abandoned.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -59,6 +62,8 @@ type storage struct {
 	lru      *list.List
 	open     int
 	maxOpen  int
+	// dirty is the set of files written since the last Sync.
+	dirty map[int]bool
 }
 
 func open(dir string, info *metainfo.Info, opts Options) (Storage, error) {
@@ -81,12 +86,6 @@ func open(dir string, info *metainfo.Info, opts Options) (Storage, error) {
 	if opts.MaxOpenFiles <= 0 {
 		opts.MaxOpenFiles = DefaultMaxOpenFiles
 	}
-	if opts.DiskWorkers <= 0 {
-		opts.DiskWorkers = DefaultDiskWorkers
-	}
-	if opts.HashWorkers <= 0 {
-		opts.HashWorkers = max(1, runtime.GOMAXPROCS(0)/2)
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("storage: create download dir: %w", err)
 	}
@@ -95,14 +94,15 @@ func open(dir string, info *metainfo.Info, opts Options) (Storage, error) {
 		info:     info,
 		files:    make([]file, len(info.Files)),
 		ends:     make([]int64, len(info.Files)),
-		disk:     make(chan struct{}, opts.DiskWorkers),
-		hash:     make(chan struct{}, opts.HashWorkers),
+		pools:    opts.Pools,
+		dirty:    map[int]bool{},
 		verified: make([]bool, info.NumPieces()),
 		cache:    make(map[int]*handle),
 		lru:      list.New(),
 		maxOpen:  opts.MaxOpenFiles,
 	}
 	s.cond = sync.NewCond(&s.mu)
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 	for i, mf := range info.Files {
 		f := &s.files[i]
 		*f = file{
@@ -121,8 +121,13 @@ func open(dir string, info *metainfo.Info, opts Options) (Storage, error) {
 			continue
 		}
 		if err := prepare(f); err != nil {
+			s.cancel()
 			return nil, err
 		}
+	}
+	if s.pools == nil {
+		s.pools = NewPools(opts.DiskWorkers, opts.HashWorkers)
+		s.private = true
 	}
 	return s, nil
 }
@@ -237,9 +242,13 @@ func (s *storage) WriteBlock(index int, begin int, data []byte) error {
 	if err != nil {
 		return err
 	}
-	s.disk <- struct{}{}
-	defer func() { <-s.disk }()
-	return s.io(off, data, true)
+	return s.onDisk(func() error {
+		if err := s.io(off, data, true); err != nil {
+			return err
+		}
+		s.markDirty(off, int64(len(data)))
+		return nil
+	})
 }
 
 // ReadBlock implements Storage.
@@ -252,9 +261,7 @@ func (s *storage) ReadBlock(index int, begin int, buf []byte) error {
 	if err != nil {
 		return err
 	}
-	s.disk <- struct{}{}
-	defer func() { <-s.disk }()
-	return s.io(off, buf, false)
+	return s.onDisk(func() error { return s.io(off, buf, false) })
 }
 
 // io reads or writes the flat range [off, off+len(buf)). Pad ranges read as
@@ -307,17 +314,26 @@ func (s *storage) VerifyPiece(index int) (bool, error) {
 	if size == 0 {
 		return false, fmt.Errorf("%w: piece %d", ErrOutOfRange, index)
 	}
-	s.hash <- struct{}{}
-	defer func() { <-s.hash }()
+	var ok bool
+	var herr error
+	if err := s.run(s.pools.Hash, func() error {
+		ok, herr = s.hashPiece(index, size)
+		return herr
+	}); err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// hashPiece streams piece index through SHA-1 with a bounded buffer. It
+// runs on a hash worker and reads the files itself (not through Disk).
+func (s *storage) hashPiece(index int, size int64) (bool, error) {
 	off := int64(index) * s.info.PieceLength
 	buf := make([]byte, min(size, verifyChunk))
 	h := sha1.New()
 	for done := int64(0); done < size; {
 		chunk := buf[:min(int64(len(buf)), size-done)]
-		s.disk <- struct{}{}
-		err := s.io(off+done, chunk, false)
-		<-s.disk
-		if err != nil {
+		if err := s.io(off+done, chunk, false); err != nil {
 			return false, err
 		}
 		h.Write(chunk)
@@ -368,8 +384,10 @@ func (s *storage) MarkVerified(index int) error {
 // dropped first (closed now, or by its last user), so later opens use the
 // new name.
 func (s *storage) finish(fi int) error {
-	s.disk <- struct{}{}
-	defer func() { <-s.disk }()
+	return s.onDisk(func() error { return s.rename(fi) })
+}
+
+func (s *storage) rename(fi int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := &s.files[fi]
@@ -393,6 +411,7 @@ func (s *storage) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.cancel()
 	s.cond.Broadcast() // wake acquirers so they observe closed
 	for s.active > 0 {
 		s.cond.Wait()
@@ -402,6 +421,11 @@ func (s *storage) Close() error {
 		if err := s.drop(h); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if s.private {
+		s.mu.Unlock()
+		s.pools.Close()
+		s.mu.Lock()
 	}
 	return firstErr
 }

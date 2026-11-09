@@ -1,6 +1,6 @@
 package api
 
-// FROZEN CONTRACT TESTS (ADR-0011) for the M3 torrent routes. Owned by the
+// FROZEN CONTRACT TESTS (ADR-0011, ADR-0016) for the M3 and M4 torrent routes. Owned by the
 // architect. They use a fake TorrentService, so they need no engine.
 
 import (
@@ -30,6 +30,44 @@ type fakeTorrents struct {
 	order   [][20]byte
 	byID    map[[20]byte]session.Status
 	lastOpt session.AddOptions
+	actions []string
+	// actErr, if set, is returned by the next lifecycle action.
+	actErr error
+}
+
+func (f *fakeTorrents) act(name string, id [20]byte, to session.State) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, name)
+	if f.actErr != nil {
+		err := f.actErr
+		f.actErr = nil
+		return err
+	}
+	st, ok := f.byID[id]
+	if !ok {
+		return fmt.Errorf("%s: %w", name, session.ErrNotFound)
+	}
+	st.State = to
+	if to == session.StateStopped {
+		st.StopReason = session.StopReasonUser
+	} else {
+		st.StopReason = session.StopReasonNone
+	}
+	f.byID[id] = st
+	return nil
+}
+
+func (f *fakeTorrents) Pause(_ context.Context, id [20]byte) error {
+	return f.act("pause", id, session.StatePaused)
+}
+
+func (f *fakeTorrents) Resume(_ context.Context, id [20]byte) error {
+	return f.act("resume", id, session.StateDownloading)
+}
+
+func (f *fakeTorrents) StopSeeding(_ context.Context, id [20]byte) error {
+	return f.act("stop-seeding", id, session.StateStopped)
 }
 
 func (f *fakeTorrents) Add(_ context.Context, m *metainfo.MetaInfo, opts session.AddOptions) (session.Status, error) {
@@ -282,5 +320,69 @@ func TestContractTorrentRoutes(t *testing.T) {
 	body, ct := addForm(contractTorrent(t, "delta"), nil)
 	if r := call(h, "POST", "/api/v1/torrents/preview", body, ct); r.status != 200 {
 		t.Errorf("preview = %d %s", r.status, r.body)
+	}
+}
+
+func TestContractLifecycleRoutes(t *testing.T) {
+	s, f := contractServer()
+	h := s.Handler()
+	torrent := contractTorrent(t, "life")
+	body, ct := addForm(torrent, map[string]string{"downloadDir": "/tmp/x"})
+	if r := call(h, "POST", "/api/v1/torrents", body, ct); r.status != 201 {
+		t.Fatalf("add = %d %s", r.status, r.body)
+	}
+	id := infoHashHex(t, torrent)
+	base := "/api/v1/torrents/" + id
+
+	r := call(h, "POST", base+"/stop-seeding", nil, "")
+	if r.status != 204 || len(r.body) != 0 {
+		t.Fatalf("stop-seeding = %d %q, want 204 and no body", r.status, r.body)
+	}
+	g := call(h, "GET", base, nil, "")
+	m := checkTorrentJSON(t, g.body)
+	if m["state"] != "stopped" || m["stopReason"] != "user" {
+		t.Fatalf("after stop-seeding: state %v stopReason %v", m["state"], m["stopReason"])
+	}
+	if r := call(h, "POST", base+"/resume", nil, ""); r.status != 204 {
+		t.Fatalf("resume = %d %s", r.status, r.body)
+	}
+	m = checkTorrentJSON(t, call(h, "GET", base, nil, "").body)
+	if m["state"] != "downloading" || m["stopReason"] != nil {
+		t.Fatalf("after resume: state %v stopReason %v (want null)", m["state"], m["stopReason"])
+	}
+	if r := call(h, "POST", base+"/pause", nil, ""); r.status != 204 {
+		t.Fatalf("pause = %d %s", r.status, r.body)
+	}
+
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{fmt.Errorf("x: %w", session.ErrInvalidState), 409, CodeInvalidState},
+		{fmt.Errorf("x: %w", session.ErrNotComplete), 409, CodeNotComplete},
+		{fmt.Errorf("x: %w", session.ErrNotFound), 404, CodeNotFound},
+		{fmt.Errorf("boom"), 500, "internal"},
+	} {
+		f.mu.Lock()
+		f.actErr = tc.err
+		f.mu.Unlock()
+		r := call(h, "POST", base+"/pause", nil, "")
+		if r.status != tc.status || code(t, r) != tc.code {
+			t.Errorf("error %v -> %d %s, want %d %s", tc.err, r.status, code(t, r), tc.status, tc.code)
+		}
+	}
+
+	unknown := "/api/v1/torrents/" + strings.Repeat("cd", 20)
+	for _, a := range []string{"pause", "resume", "stop-seeding"} {
+		if r := call(h, "POST", unknown+"/"+a, nil, ""); r.status != 404 || code(t, r) != CodeNotFound {
+			t.Errorf("%s on unknown id = %d %s", a, r.status, r.body)
+		}
+		if r := call(h, "POST", "/api/v1/torrents/XYZ/"+a, nil, ""); r.status != 404 {
+			t.Errorf("%s on malformed id = %d", a, r.status)
+		}
+		if r := call(h, "GET", base+"/"+a, nil, ""); r.status != 405 || !strings.Contains(r.header.Get("Allow"), "POST") {
+			t.Errorf("GET %s = %d Allow %q, want 405 Allow: POST", a, r.status, r.header.Get("Allow"))
+		}
 	}
 }

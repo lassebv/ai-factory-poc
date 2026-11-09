@@ -2,423 +2,165 @@ package session
 
 import (
 	"context"
-	"crypto/sha1"
+	"encoding/binary"
 	"errors"
-	"math/rand/v2"
+	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
-	"torrentd/internal/bt/bencode"
-	"torrentd/internal/bt/metainfo"
-	"torrentd/internal/bt/peer"
-	"torrentd/internal/bt/piece"
-	"torrentd/internal/bt/storage"
-	"torrentd/internal/bt/tracker"
+	"torrentd/internal/bt/btest"
 	"torrentd/internal/clock"
 )
 
-// fakeConn is a peer.Conn that records what the actor sends.
-type fakeConn struct {
-	mu     sync.Mutex
-	sent   []peer.Message
-	closed bool
-	done   chan struct{}
-}
-
-func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
-
-func (c *fakeConn) Send(m peer.Message) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return peer.ErrClosed
-	}
-	c.sent = append(c.sent, m)
-	return nil
-}
-
-func (c *fakeConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.closed {
-		c.closed = true
-		close(c.done)
-	}
-	return nil
-}
-
-func (c *fakeConn) Done() <-chan struct{}  { return c.done }
-func (c *fakeConn) Err() error             { return nil }
-func (c *fakeConn) Remote() peer.Handshake { return peer.Handshake{} }
-func (c *fakeConn) RemoteAddr() net.Addr   { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
-func (c *fakeConn) isClosed() bool         { c.mu.Lock(); defer c.mu.Unlock(); return c.closed }
-func (c *fakeConn) count(id peer.MessageID) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := 0
-	for _, m := range c.sent {
-		if m.ID == id {
-			n++
-		}
-	}
-	return n
-}
-
-func (c *fakeConn) requests() []peer.Message {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var out []peer.Message
-	for _, m := range c.sent {
-		if m.ID == peer.MsgRequest {
-			out = append(out, m)
-		}
-	}
-	c.sent = nil
-	return out
-}
-
-// unitTorrent builds a 2-piece single-file torrent of 40000 bytes.
-func unitTorrent(t *testing.T) (*metainfo.MetaInfo, []byte) {
+// rawPeer handshakes with the session on port for tt and returns the conn.
+func rawPeer(t *testing.T, port int, tt *testTorrent) net.Conn {
 	t.Helper()
-	data := make([]byte, 40000)
-	for i := range data {
-		data[i] = byte(i * 7)
-	}
-	h1, h2 := sha1.Sum(data[:32768]), sha1.Sum(data[32768:])
-	info, _ := bencode.Marshal(map[string]any{"name": "u.bin", "length": len(data), "piece length": 32768,
-		"pieces": append(h1[:], h2[:]...)})
-	raw, err := bencode.Marshal(map[string]any{"announce": "http://127.0.0.1:1/announce", "info": bencode.RawMessage(info)})
+	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := metainfo.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { c.Close() })
+	c.SetDeadline(time.Now().Add(20 * time.Second))
+	hs := append([]byte{19}, "BitTorrent protocol"...)
+	hs = append(hs, make([]byte, 8)...)
+	hs = append(hs, tt.mi.InfoHash[:]...)
+	hs = append(hs, "-UT0001-000000000000"...)
+	c.Write(hs)
+	var rh [68]byte
+	if _, err := io.ReadFull(c, rh[:]); err != nil {
+		t.Fatalf("handshake: %v", err)
 	}
-	return m, data
+	return c
 }
 
-// unitSession is a session without a listener, on a fake clock.
-func unitSession() *session {
-	return &session{
-		clk:      clock.NewFake(time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)),
-		log:      quiet,
-		rnd:      rand.New(rand.NewPCG(3, 4)),
-		torrents: map[[20]byte]*torrent{},
-		port:     6881,
-		tracker:  tracker.NewHTTPClient(nil),
-	}
+func req(id byte, idx, begin, n uint32) []byte {
+	p := binary.BigEndian.AppendUint32(nil, idx)
+	p = binary.BigEndian.AppendUint32(p, begin)
+	p = binary.BigEndian.AppendUint32(p, n)
+	return msg(id, p)
 }
 
-// openTorrent returns a torrent in state downloading with real storage.
-func openTorrent(t *testing.T) (*torrent, []byte) {
-	t.Helper()
-	m, data := unitTorrent(t)
-	s := unitSession()
-	dir := t.TempDir()
-	tor := newTorrent(s, m, dir, false)
-	st, err := storage.Open(dir, m.Info, storage.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tor.handle(evOpened{st: st})
-	if tor.state != StateDownloading {
-		t.Fatalf("state %s after open", tor.state)
-	}
-	t.Cleanup(func() { tor.shutdown(context.Background()) })
-	return tor, data
-}
+// A seeding torrent ignores invalid requests, honours cancel and closes
+// the connection on an oversized request (WIRE-03).
+func TestSeedingProtocolEdges(t *testing.T) {
+	btest.CheckGoroutines(t)
+	tr := newTracker(t)
+	tt, dir := seedingTorrent(t, tr, "edges")
+	s := startWith(t, Config{})
+	s.Add(context.Background(), tt.mi, AddOptions{DownloadDir: dir})
+	waitState(t, s, tt.mi.InfoHash, StateSeeding, 15*time.Second)
 
-func addFakePeer(tor *torrent, port uint16) (*fakeConn, piece.PeerKey) {
-	c := newFakeConn()
-	tor.nextKey++
-	k := tor.nextKey
-	tor.peers[k] = &peerState{key: k, addr: netip.AddrPortFrom(netip.MustParseAddr("10.0.0.1"), port),
-		conn: c, choked: true, since: tor.s.clk.Now()}
-	tor.picker.AddPeer(k)
-	return c, k
-}
-
-// drain handles queued actor events until none arrive for a while.
-func drain(t *testing.T, tor *torrent) {
-	t.Helper()
+	c := rawPeer(t, s.PeerPort(), tt)
+	c.Write(msg(4, binary.BigEndian.AppendUint32(nil, 0))) // have 0
+	c.Write(req(6, 0, 0, 16384))                           // choked: ignored
+	c.Write(msg(2, nil))                                   // interested
 	for {
-		select {
-		case ev := <-tor.events:
-			tor.handle(ev)
-		case <-time.After(200 * time.Millisecond):
-			return
+		id, _, err := readFull(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id == 1 {
+			break
 		}
 	}
-}
-
-func serveBlocks(tor *torrent, k piece.PeerKey, reqs []peer.Message, data []byte) {
-	for _, r := range reqs {
-		off := int(r.Index)*32768 + int(r.Begin)
-		tor.handle(evMessage{k, peer.Message{ID: peer.MsgPiece, Index: r.Index, Begin: r.Begin,
-			Block: append([]byte(nil), data[off:off+int(r.Length)]...)}})
-	}
-}
-
-func TestActorDownloadsAndHandlesMessages(t *testing.T) {
-	tor, data := openTorrent(t)
-	c, k := addFakePeer(tor, 1000)
-
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgHave, Index: 1}})
-	if c.count(peer.MsgInterested) != 1 {
-		t.Fatal("have of a needed piece must send interested")
-	}
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgBitfield, Bitfield: []byte{0xc0}}})
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgUnchoke}})
-	reqs := c.requests()
-	if len(reqs) != 3 { // every block: fewer than the minimum depth
-		t.Fatalf("%d requests, want all 3 blocks", len(reqs))
-	}
-	// A choke releases the outstanding blocks.
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgChoke}})
-	if n := tor.picker.Outstanding(k); n != 0 {
-		t.Fatalf("outstanding after choke = %d", n)
-	}
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgUnchoke}})
-	for i := 0; i < 10 && tor.state == StateDownloading; i++ {
-		serveBlocks(tor, k, c.requests(), data)
-		drain(t, tor)
-	}
-	if tor.state != StateSeeding {
-		t.Fatalf("state %s, want seeding", tor.state)
-	}
-	tor.publish()
-	st := tor.status.Load()
-	if st.CompletedBytes != int64(len(data)) || st.Progress != 1 || st.CompletedAt.IsZero() || st.PeersConnected != 1 || st.SeedsConnected != 1 {
-		t.Fatalf("status %+v", st)
-	}
-	got, err := os.ReadFile(filepath.Join(tor.dir, "u.bin"))
-	if err != nil || string(got) != string(data) {
-		t.Fatalf("file content wrong (%v)", err)
-	}
-	if c.count(peer.MsgNotInterested) != 1 || c.count(peer.MsgHave) != 2 {
-		t.Errorf("not-interested %d, have %d", c.count(peer.MsgNotInterested), c.count(peer.MsgHave))
-	}
-	// A block after completion is wasted.
-	w := tor.wasted.Load()
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgPiece, Index: 0, Begin: 0, Block: make([]byte, 100)}})
-	if tor.wasted.Load() != w+100 {
-		t.Error("a block received while seeding must count as wasted")
-	}
-	tor.handle(evPeerClosed{k, errors.New("boom")})
-	if len(tor.peers) != 0 {
-		t.Error("closed peer still registered")
-	}
-	tor.handle(evPeerClosed{k, nil}) // unknown peer: ignored
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgUnchoke}})
-}
-
-func TestActorHashFailureAndRejectedBlocks(t *testing.T) {
-	tor, data := openTorrent(t)
-	c, k := addFakePeer(tor, 1001)
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgBitfield, Bitfield: []byte{0xc0}}})
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgUnchoke}})
-	bad := append([]byte(nil), data...)
-	bad[5] ^= 0xff
-	serveBlocks(tor, k, c.requests(), bad)
-	// A misaligned block is rejected and wasted.
-	tor.handle(evMessage{k, peer.Message{ID: peer.MsgPiece, Index: 0, Begin: 3, Block: make([]byte, 10)}})
-	drain(t, tor)
-	if tor.wasted.Load() < 32768+10 {
-		t.Fatalf("wasted = %d, want >= a piece + 10", tor.wasted.Load())
-	}
-	for i := 0; i < 10 && tor.state == StateDownloading; i++ {
-		serveBlocks(tor, k, c.requests(), data)
-		drain(t, tor)
-	}
-	if tor.state != StateSeeding {
-		t.Fatalf("state %s after recovering from a hash failure", tor.state)
-	}
-}
-
-func TestActorProtocolViolations(t *testing.T) {
-	tor, _ := openTorrent(t)
-	c1, k1 := addFakePeer(tor, 1)
-	tor.handle(evMessage{k1, peer.Message{ID: peer.MsgBitfield, Bitfield: []byte{0xff}}}) // spare bits set
-	if !c1.isClosed() {
-		t.Error("an invalid bitfield must disconnect")
-	}
-	c2, k2 := addFakePeer(tor, 2)
-	tor.handle(evMessage{k2, peer.Message{ID: peer.MsgHave, Index: 99}})
-	if !c2.isClosed() {
-		t.Error("an out-of-range have must disconnect")
-	}
-}
-
-func TestActorErrors(t *testing.T) {
-	tor, _ := openTorrent(t)
-	c, _ := addFakePeer(tor, 3)
-	tor.handle(evVerified{index: 0, err: errors.New("disk on fire")})
-	if tor.state != StateError || !c.isClosed() {
-		t.Fatalf("state %s closed %v", tor.state, c.isClosed())
-	}
-	tor.publish()
-	if st := tor.status.Load(); st.ErrorMessage == "" {
-		t.Error("error message missing")
-	}
-	tor.handle(evVerified{index: 0, ok: true}) // ignored in state error
-	tor.handle(evWritten{index: 0, err: errors.New("again")})
-
-	tor2, _ := openTorrent(t)
-	tor2.writes[1] = 1
-	tor2.handle(evWritten{index: 1, err: errors.New("short write")})
-	if tor2.state != StateError {
-		t.Fatalf("write error: state %s", tor2.state)
+	c.Write(msg(3, nil)) // not interested
+	c.Write(msg(2, nil))
+	c.Write(req(6, 999, 0, 16384))      // no such piece: ignored
+	c.Write(req(6, 0, 32760, 100))      // beyond the piece: ignored
+	c.Write(req(6, 1, 0, 16384))        // queued...
+	c.Write(req(8, 1, 0, 16384))        // ...and maybe cancelled
+	c.Write(msg(0, nil))                // choke (ignored by a seed)
+	c.Write(msg(1, nil))                // unchoke
+	c.Write(msg(5, []byte{0xff}))       // bad bitfield length: closes
+	time.Sleep(1200 * time.Millisecond) // let a tick run
+	for {
+		if _, _, err := readFull(c); err != nil {
+			break
+		}
 	}
 
-	m, _ := unitTorrent(t)
-	tor3 := newTorrent(unitSession(), m, t.TempDir(), false)
-	tor3.handle(evOpened{err: errors.New("no space")})
-	if tor3.state != StateError {
-		t.Fatalf("open error: state %s", tor3.state)
-	}
-	tor3.shutdown(context.Background())
-}
-
-func TestDialing(t *testing.T) {
-	tor, _ := openTorrent(t)
-	// A closed port: the dial fails.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dead := netip.MustParseAddrPort(ln.Addr().String())
-	ln.Close()
-	// A listener that hangs up without a handshake.
-	ln2, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln2.Close()
-	go func() {
-		for {
-			c, err := ln2.Accept()
-			if err != nil {
-				return
+	c2 := rawPeer(t, s.PeerPort(), tt)
+	c2.Write(msg(2, nil))
+	c2.Write(req(6, 0, 0, 32768)) // oversized
+	c2.SetDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, _, err := readFull(c2); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatal("an oversized request did not close the connection")
 			}
-			c.Close()
+			break
 		}
-	}()
-	rude := netip.MustParseAddrPort(ln2.Addr().String())
-	self := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(tor.s.port))
-	tor.handle(evPeers{[]netip.AddrPort{dead, rude, dead, self, {}}})
-	if tor.halfOpen != 2 {
-		t.Fatalf("halfOpen = %d, want 2 (duplicates, self and invalid skipped)", tor.halfOpen)
 	}
-	drain(t, tor)
-	if tor.halfOpen != 0 || len(tor.addrs) != 0 {
-		t.Fatalf("after failed dials: halfOpen %d addrs %d", tor.halfOpen, len(tor.addrs))
-	}
-	// A handshaken connection to ourselves (same peer id) is dropped.
-	a, b := net.Pipe()
-	defer b.Close()
-	tor.halfOpen++
-	tor.handle(evHandshaken{addr: rude, nc: a, hs: peer.Handshake{PeerID: tor.s.peerID}})
-	if len(tor.peers) != 0 {
-		t.Error("self connection registered")
-	}
-	// A real handshaken connection becomes a peer.
-	a2, b2 := net.Pipe()
-	defer b2.Close()
-	tor.halfOpen++
-	tor.handle(evHandshaken{addr: rude, nc: a2, hs: peer.Handshake{PeerID: [20]byte{9}}})
-	if len(tor.peers) != 1 {
-		t.Fatal("peer not registered")
-	}
-	// Not wanting peers (seeding) ignores tracker peers.
-	tor.state = StateSeeding
-	tor.handle(evPeers{[]netip.AddrPort{dead}})
-	if len(tor.queue) != 0 || tor.halfOpen != 0 {
-		t.Error("peers queued while seeding")
+	if st, _ := s.Get(tt.mi.InfoHash); st.State != StateSeeding {
+		t.Fatalf("state %s", st.State)
 	}
 }
 
-func TestIsSelf(t *testing.T) {
-	tor, _ := openTorrent(t)
-	p := uint16(tor.s.port)
-	if !tor.isSelf(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p)) {
-		t.Error("loopback with our port is self")
+func TestActionsOnErrorAndClosed(t *testing.T) {
+	btest.CheckGoroutines(t)
+	ctx := context.Background()
+	tr := newTracker(t)
+	ms := btest.NewMemStore()
+	tt, dir := seedingTorrent(t, tr, "err")
+	s := startWith(t, Config{Store: ms, PreviousClean: true})
+	s.Add(ctx, tt.mi, AddOptions{DownloadDir: dir})
+	waitState(t, s, tt.mi.InfoHash, StateSeeding, 15*time.Second)
+	s.Close(ctx)
+	if err := s.Pause(ctx, tt.mi.InfoHash); !errors.Is(err, ErrClosed) {
+		t.Fatalf("pause after close = %v", err)
 	}
-	if tor.isSelf(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p+1)) {
-		t.Error("another port is not self")
+	if _, err := s.Add(ctx, tt.mi, AddOptions{DownloadDir: dir}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("add after close = %v", err)
 	}
-	if tor.isSelf(netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), p)) {
-		t.Error("a TEST-NET address is not self")
+	os.RemoveAll(dir)
+	s2 := startWith(t, Config{Store: ms, PreviousClean: false})
+	id := tt.mi.InfoHash
+	waitState(t, s2, id, StateError, 10*time.Second)
+	if err := s2.Pause(ctx, id); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("pause in error = %v", err)
 	}
-	tor.s.port = 0
-	if tor.isSelf(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)) {
-		t.Error("unbound session has no self")
+	if err := s2.StopSeeding(ctx, id); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("stop-seeding in error = %v", err)
 	}
-}
-
-func TestResolveDirAndDefaults(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "file")
-	os.WriteFile(f, nil, 0o644)
-	if _, err := resolveDir(f); !errors.Is(err, ErrInvalidDownloadDir) {
-		t.Errorf("a file as dir: %v", err)
-	}
-	if _, err := resolveDir(filepath.Join(f, "sub")); !errors.Is(err, ErrInvalidDownloadDir) {
-		t.Errorf("a dir under a file: %v", err)
-	}
-	if _, err := resolveDir(""); !errors.Is(err, ErrInvalidDownloadDir) {
-		t.Errorf("empty dir: %v", err)
-	}
-	if _, err := New(Config{PeerPort: 70000}); err == nil {
-		t.Error("an invalid peer port must fail")
-	}
-	dir := t.TempDir()
-	s, err := New(Config{DefaultDownloadDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, _ := unitTorrent(t)
-	st, err := s.Add(context.Background(), m, AddOptions{StartPaused: true})
-	if err != nil || st.DownloadDir != dir {
-		t.Fatalf("Add with the default dir: %+v %v", st, err)
-	}
-	if _, err := s.Add(context.Background(), nil, AddOptions{}); err == nil {
-		t.Error("Add(nil) must fail")
-	}
-	if err := s.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Add(context.Background(), &metainfo.MetaInfo{InfoHash: [20]byte{1}, Info: m.Info}, AddOptions{}); !errors.Is(err, ErrClosed) {
-		t.Errorf("Add after Close: %v", err)
-	}
-}
-
-func TestCloseHonorsContext(t *testing.T) {
-	s, err := New(Config{Logger: quiet})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ss := s.(*session)
-	ss.wg.Add(1) // a goroutine that never finishes
-	ctx, cancel := context.WithCancel(context.Background())
+	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := s.Close(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("Close with a cancelled ctx = %v", err)
+	if err := s2.Resume(cctx, id); err == nil {
+		t.Fatal("a cancelled context must abort the action")
 	}
-	ss.wg.Done()
+	writeData(t, tt, dir)
+	if err := s2.Resume(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s2, id, StateSeeding, 15*time.Second)
 }
 
-func TestRateAndEmptyStatus(t *testing.T) {
-	now := time.Unix(100, 0)
-	p := &peerState{since: now.Add(-4 * time.Second), received: 4000}
-	if r := p.rate(now); r != 1000 {
-		t.Errorf("rate = %d", r)
+func TestIsSelfAndBans(t *testing.T) {
+	s := &session{log: quiet, port: 4242, banned: map[netip.Addr]time.Time{}, strikes: map[netip.Addr]int{}}
+	tor := &torrent{s: s}
+	for _, tc := range []struct {
+		a    string
+		want bool
+	}{{"127.0.0.1:4242", true}, {"0.0.0.0:4242", true}, {"127.0.0.1:1", false}, {"192.0.2.1:4242", false}} {
+		if got := tor.isSelf(netip.MustParseAddrPort(tc.a)); got != tc.want {
+			t.Errorf("isSelf(%s) = %v", tc.a, got)
+		}
 	}
-	if r := p.rate(now.Add(-4 * time.Second)); r != 4000 {
-		t.Errorf("rate within the first second = %d", r)
+	s.clk = clock.Real()
+	ip := netip.MustParseAddr("::ffff:10.0.0.1")
+	for i := 1; i < BanStrikes; i++ {
+		if s.strike(ip) {
+			t.Fatal("banned too early")
+		}
+	}
+	if !s.strike(ip) || !s.isBanned(netip.MustParseAddr("10.0.0.1")) {
+		t.Fatal("not banned after BanStrikes strikes")
+	}
+	s.banned[ip.Unmap()] = time.Now().Add(-time.Second)
+	if s.isBanned(ip) || s.strike(netip.Addr{}) {
+		t.Fatal("expired ban or invalid IP")
 	}
 }

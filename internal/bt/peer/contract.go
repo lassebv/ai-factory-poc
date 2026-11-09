@@ -2,12 +2,13 @@
 // handshake, the core messages and a connection with separate read and
 // write goroutines (§4.1 Peer wire, §4.5, §11 robustness, D13).
 //
-// FROZEN CONTRACT (ADR-0011, ADR-0012). This file is owned by the architect.
+// FROZEN CONTRACT (ADR-0011, ADR-0012, ADR-0017). This file is owned by the architect.
 // The implementer provides, in their own files (replacing stub.go):
 //
 //	func writeHandshake(w io.Writer, h Handshake) error
 //	func readHandshake(r io.Reader) (Handshake, error)
 //	func exchangeHandshake(ctx context.Context, nc net.Conn, ours Handshake) (Handshake, error)
+//	func acceptHandshake(ctx context.Context, nc net.Conn, lookup func(infoHash [20]byte) (Handshake, bool)) (Handshake, error)
 //	func readMessage(r io.Reader, maxBitfieldLen int) (Message, error)
 //	func writeMessage(w io.Writer, m Message) error
 //	func newConn(nc net.Conn, remote Handshake, cfg Config) Conn
@@ -102,6 +103,9 @@ var (
 	ErrIdleTimeout = errors.New("peer: idle timeout")
 	// ErrSendQueueFull: more than SendQueueLimit messages queued.
 	ErrSendQueueFull = errors.New("peer: send queue full")
+	// ErrUnknownTorrent: an incoming handshake names a torrent the lookup
+	// refused (unknown, paused or stopped).
+	ErrUnknownTorrent = errors.New("peer: unknown torrent")
 	// ErrClosed: Send on a closed Conn.
 	ErrClosed = errors.New("peer: connection closed")
 )
@@ -160,6 +164,16 @@ func ExchangeHandshake(ctx context.Context, nc net.Conn, ours Handshake) (Handsh
 	return exchangeHandshake(ctx, nc, ours)
 }
 
+// AcceptHandshake performs the incoming side of the handshake on nc: it
+// reads the remote handshake, calls lookup with its info-hash and, if
+// lookup returns ok, writes our handshake (lookup's result) and returns the
+// remote one. If lookup refuses, nothing is written and ErrUnknownTorrent is
+// returned. ctx bounds the whole exchange like ExchangeHandshake. It does
+// not close nc (on success or failure); the caller does.
+func AcceptHandshake(ctx context.Context, nc net.Conn, lookup func(infoHash [20]byte) (Handshake, bool)) (Handshake, error) {
+	return acceptHandshake(ctx, nc, lookup)
+}
+
 // ReadMessage reads one length-prefixed message. maxBitfieldLen bounds a
 // bitfield payload (values <= 0 or above MaxBitfieldLen mean
 // MaxBitfieldLen). Oversized messages fail with ErrMessageTooLarge before
@@ -189,6 +203,12 @@ type Config struct {
 	// the same value as Err. It runs on a Conn goroutine and may call any
 	// Conn method.
 	OnClose func(error)
+	// OnPieceSent, if set, is called on the write goroutine after a piece
+	// message has been fully written to nc, with its Block length. The
+	// session uses it to count uploadedTotal (bytes actually sent, not
+	// queued) and to bound the blocks it keeps queued per peer. It must not
+	// block for long (a non-blocking send to the actor).
+	OnPieceSent func(index, begin uint32, n int)
 	// Logger receives debug logs; nil means slog.Default().
 	Logger *slog.Logger
 }

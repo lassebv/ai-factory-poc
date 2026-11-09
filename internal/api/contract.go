@@ -1,6 +1,7 @@
 package api
 
-// FROZEN CONTRACT (ADR-0011, ADR-0015) for the milestone 3 torrent routes.
+// FROZEN CONTRACT (ADR-0011, ADR-0015, ADR-0016) for the milestone 3 and 4
+// torrent routes.
 // This file is owned by the architect; the integrator implements the
 // handlers in other files.
 //
@@ -20,6 +21,10 @@ package api
 //	GET  /api/v1/torrents/{id}        get
 //	/api/v1/torrents/{id}             405: Allow: POST when id == "preview",
 //	                                  otherwise Allow: GET (M6 adds PATCH, DELETE)
+//	POST /api/v1/torrents/{id}/pause          M4 lifecycle actions
+//	POST /api/v1/torrents/{id}/resume
+//	POST /api/v1/torrents/{id}/stop-seeding
+//	/api/v1/torrents/{id}/{pause,resume,stop-seeding}   405, Allow: POST
 //	/api/                             404 not_found
 //	/                                 SPA
 //
@@ -47,6 +52,24 @@ package api
 //   - {id} must be 40 lowercase hex characters (TorrentId schema); an id
 //     that is malformed or unknown is 404 not_found.
 //
+// # POST /api/v1/torrents/{id}/{pause,resume,stop-seeding} (M4, G18)
+//
+//   - {id} as for GET; malformed or unknown -> 404 not_found. Any request
+//     body is ignored.
+//   - Success (including the no-op cases): 204 with no body.
+//   - session.ErrNotFound -> 404 not_found; session.ErrInvalidState -> 409
+//     invalid_state; session.ErrNotComplete -> 409 not_complete; anything
+//     else -> 500 internal. The Conflict body is the Error schema.
+//   - The action is called with the request context; the handler returns
+//     after the action returned, so a GET right after a 204 sees the new
+//     state.
+//
+// # Torrent JSON at M4
+//
+// As at M3, plus: StopReason is the session.StopReason string when the
+// state is stopped (null otherwise); CheckingProgress is set (0..1) while
+// checking; UploadedTotal, UploadRate and DownloadRate come from Status.
+//
 // When Options.Torrents is nil the torrent routes return 500 internal.
 
 import (
@@ -65,6 +88,12 @@ type TorrentService interface {
 	List() []session.Status
 	// Get returns one torrent.
 	Get(id [20]byte) (session.Status, bool)
+	// Pause pauses a torrent (session.Session.Pause).
+	Pause(ctx context.Context, id [20]byte) error
+	// Resume resumes a torrent (session.Session.Resume).
+	Resume(ctx context.Context, id [20]byte) error
+	// StopSeeding stops seeding a torrent (session.Session.StopSeeding).
+	StopSeeding(ctx context.Context, id [20]byte) error
 }
 
 var _ TorrentService = session.Session(nil)

@@ -1,21 +1,26 @@
 package storage
 
-// FROZEN CONTRACT TESTS (ADR-0011). Owned by the architect. Every correct
+// FROZEN CONTRACT TESTS (ADR-0011, ADR-0017, ADR-0019). Owned by the architect. Every correct
 // implementation of contract.go must pass these.
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"errors"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"torrentd/internal/bt/btest"
 	"torrentd/internal/bt/metainfo"
+	"torrentd/internal/bt/piece"
 )
 
 type tfile struct {
@@ -379,5 +384,227 @@ func TestContractOpenFileLimit(t *testing.T) {
 	}
 	if n := openFDs() - base; n > 1 {
 		t.Errorf("%d file descriptors still open after Close", n)
+	}
+}
+
+// ---- M4 (ADR-0017, ADR-0019) ----
+
+func TestContractPoolBoundsAndClose(t *testing.T) {
+	btest.CheckGoroutines(t)
+	p := NewPool(3)
+	if p.Workers() != 3 {
+		t.Fatalf("Workers = %d", p.Workers())
+	}
+	var running, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.Run(context.Background(), func() {
+				n := running.Add(1)
+				for {
+					old := peak.Load()
+					if n <= old || peak.CompareAndSwap(old, n) {
+						break
+					}
+				}
+				time.Sleep(2 * time.Millisecond)
+				running.Add(-1)
+			})
+		}()
+	}
+	wg.Wait()
+	if peak.Load() > 3 || peak.Load() < 2 {
+		t.Fatalf("peak concurrency %d with 3 workers", peak.Load())
+	}
+	// Run with a done ctx while the pool is busy never runs fn.
+	gate := make(chan struct{})
+	for i := 0; i < 3; i++ {
+		if err := p.Submit(func() { <-gate }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	ran := false
+	if err := p.Run(ctx, func() { ran = true }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run on a busy pool with an expiring ctx = %v", err)
+	}
+	var dropped atomic.Bool
+	p.Submit(func() { dropped.Store(true) }) // queued behind the gate
+	go func() { time.Sleep(50 * time.Millisecond); close(gate) }()
+	p.Close() // waits for the 3 running fns, drops the queued one
+	p.Close()
+	if ran || dropped.Load() {
+		t.Fatal("a cancelled Run or a queued Submit ran after Close")
+	}
+	if err := p.Submit(func() {}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Submit after Close = %v", err)
+	}
+	if err := p.Run(context.Background(), func() {}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Run after Close = %v", err)
+	}
+}
+
+// Storage work runs on the shared pools: with the single disk worker
+// blocked, WriteBlock cannot complete; with the hash worker blocked,
+// VerifyPiece cannot.
+func TestContractStorageUsesSharedPools(t *testing.T) {
+	btest.CheckGoroutines(t)
+	info, flat := buildInfo("pools.bin", 32768, tfile{path: []string{"pools.bin"}, size: 65536})
+	pools := NewPools(1, 1)
+	defer pools.Close()
+	dir := t.TempDir()
+	s := mustOpen(t, dir, info, Options{Pools: pools})
+	for name, tc := range map[string]struct {
+		pool Pool
+		op   func() error
+	}{
+		"disk": {pools.Disk, func() error { return s.WriteBlock(0, 0, flat[:16384]) }},
+		"hash": {pools.Hash, func() error { _, err := s.VerifyPiece(1); return err }},
+	} {
+		gate := make(chan struct{})
+		tc.pool.Submit(func() { <-gate })
+		done := make(chan error, 1)
+		go func() { done <- tc.op() }()
+		select {
+		case err := <-done:
+			t.Fatalf("%s: operation finished (%v) while the only %s worker was busy", name, err, name)
+		case <-time.After(100 * time.Millisecond):
+		}
+		close(gate)
+		if err := <-done; err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	writePiece(t, s, info, flat, 0)
+	res := make(chan bool, 1)
+	if err := s.VerifyPieceAsync(0, func(ok bool, err error) {
+		if err != nil {
+			t.Error(err)
+		}
+		res <- ok
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !<-res {
+		t.Fatal("VerifyPieceAsync: a correctly written piece failed")
+	}
+	if err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if err := s.Sync(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Sync after Close = %v", err)
+	}
+	if err := s.VerifyPieceAsync(0, func(bool, error) {}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("VerifyPieceAsync after Close = %v", err)
+	}
+	// The shared pools are not closed by a Storage.
+	if err := pools.Disk.Run(context.Background(), func() {}); err != nil {
+		t.Fatalf("Storage.Close closed the shared pools: %v", err)
+	}
+}
+
+func TestContractPrivatePoolsClosed(t *testing.T) {
+	btest.CheckGoroutines(t)
+	info, _ := buildInfo("priv.bin", 32768, tfile{path: []string{"priv.bin"}, size: 40000})
+	s, err := Open(t.TempDir(), info, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close() // must stop its private pools' workers
+}
+
+func TestContractStatFingerprint(t *testing.T) {
+	info, flat := buildInfo("st", 32768,
+		tfile{path: []string{"a.bin"}, size: 40000},
+		tfile{path: []string{"pad"}, size: 25536, pad: true},
+		tfile{path: []string{"b.bin"}, size: 30000})
+	dir := filepath.Join(t.TempDir(), "never-created")
+	fp, err := Stat(dir, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fp) != 2 || fp[0].Exists || fp[1].Exists || fp[0].Path != "st/a.bin" || fp[1].Path != "st/b.bin" {
+		t.Fatalf("Stat of nothing = %+v", fp)
+	}
+	if exists(dir) {
+		t.Fatal("Stat created the download dir")
+	}
+	s := mustOpen(t, dir, info, Options{})
+	writePiece(t, s, info, flat, 0)
+	fp, err = Stat(dir, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fp[0].Exists || fp[0].Size != 40000 || fp[0].ModTime == 0 || !fp[1].Exists || fp[1].Size != 30000 {
+		t.Fatalf("Stat after Open = %+v", fp)
+	}
+	later := time.Now().Add(time.Hour)
+	os.Chtimes(filepath.Join(dir, "st", "b.bin"+PartSuffix), later, later)
+	fp2, _ := Stat(dir, info)
+	if fp2[1].ModTime != later.UnixNano() && fp2[1].ModTime/1e9 != later.Unix() {
+		t.Fatalf("mtime %d, want %d", fp2[1].ModTime, later.UnixNano())
+	}
+}
+
+func TestContractPlanResume(t *testing.T) {
+	// Pieces of 32 KiB: file a = pieces 0-1 (and half of 2), b = 2-3.
+	info, _ := buildInfo("pr", 32768,
+		tfile{path: []string{"a.bin"}, size: 80000},
+		tfile{path: []string{"b.bin"}, size: 51072})
+	if info.NumPieces() != 4 {
+		t.Fatalf("setup: %d pieces", info.NumPieces())
+	}
+	bf := func(idx ...int) *piece.Bitfield {
+		b := piece.NewBitfield(4)
+		for _, i := range idx {
+			b.Set(i)
+		}
+		return b
+	}
+	saved := Fingerprint{{Path: "pr/a.bin", Exists: true, Size: 80000, ModTime: 100}, {Path: "pr/b.bin", Exists: true, Size: 51072, ModTime: 200}}
+	mod := func(f func(fp Fingerprint)) Fingerprint {
+		c := append(Fingerprint(nil), saved...)
+		f(c)
+		return c
+	}
+	all := bf(0, 1, 2, 3)
+	for _, tc := range []struct {
+		name    string
+		in      ResumeInput
+		missing bool
+		trusted []int
+		recheck []int
+	}{
+		{"clean, unchanged", ResumeInput{Saved: all, SavedFingerprint: saved, Current: saved, Clean: true}, false, []int{0, 1, 2, 3}, nil},
+		{"clean, b mtime changed", ResumeInput{Saved: all, SavedFingerprint: saved, Current: mod(func(f Fingerprint) { f[1].ModTime = 999 }), Clean: true}, false, []int{0, 1}, []int{2, 3}},
+		{"clean, no saved fingerprint", ResumeInput{Saved: bf(1), Current: saved, Clean: true}, false, nil, []int{1}},
+		{"unclean, mtimes ignored", ResumeInput{Saved: bf(0, 3), SavedFingerprint: saved, Current: mod(func(f Fingerprint) { f[0].ModTime, f[1].ModTime = 1, 2 }), Clean: false}, false, []int{0, 3}, nil},
+		{"unclean, a resized", ResumeInput{Saved: all, SavedFingerprint: saved, Current: mod(func(f Fingerprint) { f[0].Size = 10 }), Clean: false}, false, []int{3}, []int{0, 1, 2}},
+		{"b missing", ResumeInput{Saved: all, SavedFingerprint: saved, Current: mod(func(f Fingerprint) { f[1] = FileStat{Path: "pr/b.bin"} }), Clean: true}, false, []int{0, 1}, nil},
+		{"all missing", ResumeInput{Saved: bf(2), SavedFingerprint: saved, Current: Fingerprint{{Path: "pr/a.bin"}, {Path: "pr/b.bin"}}, Clean: true}, true, nil, nil},
+		{"fresh add, nothing on disk", ResumeInput{Current: Fingerprint{{Path: "pr/a.bin"}, {Path: "pr/b.bin"}}, Clean: true}, false, nil, nil},
+		{"fresh add over existing data", ResumeInput{Current: mod(func(f Fingerprint) { f[1] = FileStat{Path: "pr/b.bin"} }), Clean: true}, false, nil, []int{0, 1, 2}},
+	} {
+		tc.in.Info = info
+		got := PlanResume(tc.in)
+		if got.FilesMissing != tc.missing {
+			t.Errorf("%s: FilesMissing = %v", tc.name, got.FilesMissing)
+			continue
+		}
+		var trusted []int
+		if got.Trusted != nil {
+			for i := 0; i < 4; i++ {
+				if got.Trusted.Has(i) {
+					trusted = append(trusted, i)
+				}
+			}
+		}
+		if !tc.missing && (!slices.Equal(trusted, tc.trusted) || !slices.Equal(got.Recheck, tc.recheck)) {
+			t.Errorf("%s: trusted %v recheck %v, want %v %v", tc.name, trusted, got.Recheck, tc.trusted, tc.recheck)
+		}
 	}
 }

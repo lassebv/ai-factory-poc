@@ -114,5 +114,6 @@ Package contracts: in Approach C, each package's frozen interface lives in its `
 | Incoming peers | The peer port accepts BEP 3 connections for active torrents and serves pieces per the choking algorithm (§4.1). Connections for stopped or paused torrents are refused or closed. |
 | Persistence | Torrents and their state survive restarts on the same `--data-dir` (§6.1 step 4, §7, §16.3). |
 | Tracker peers | Dict peer lists may contain IPv6 literals. Bans are per IP (G10). |
+| Package contracts (A+) | `internal/bt/{piece,choke,storage,peer,session}/contract.go`, `internal/store/contract.go`, `internal/api/contract.go` (ADR-0017, 0018, 0019). Shared test helpers: `internal/bt/btest` (goroutine-leak check, in-memory `session.Store`). |
 
 Torrent-file parsing is **not** pinned. It is tested black-box through `POST /api/v1/torrents/preview` (see `spec/openapi.yaml`).

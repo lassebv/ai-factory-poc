@@ -75,6 +75,39 @@ func exchangeHandshake(ctx context.Context, nc net.Conn, ours Handshake) (Handsh
 	return theirs, err
 }
 
+func acceptHandshake(ctx context.Context, nc net.Conn, lookup func(infoHash [20]byte) (Handshake, bool)) (Handshake, error) {
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(fired)
+		_ = nc.SetDeadline(time.Unix(1, 0))
+	})
+	theirs, err := doAccept(nc, lookup)
+	if !stop() {
+		<-fired
+		_ = nc.SetDeadline(time.Time{})
+		if err == nil {
+			err = errors.New("peer: handshake aborted")
+		}
+		return Handshake{}, fmt.Errorf("peer: handshake: %w (%w)", ctx.Err(), err)
+	}
+	return theirs, err
+}
+
+func doAccept(nc net.Conn, lookup func(infoHash [20]byte) (Handshake, bool)) (Handshake, error) {
+	theirs, err := readHandshake(nc)
+	if err != nil {
+		return Handshake{}, err
+	}
+	ours, ok := lookup(theirs.InfoHash)
+	if !ok {
+		return Handshake{}, fmt.Errorf("%w: %x", ErrUnknownTorrent, theirs.InfoHash)
+	}
+	if err := writeHandshake(nc, ours); err != nil {
+		return Handshake{}, fmt.Errorf("peer: writing handshake: %w", err)
+	}
+	return theirs, nil
+}
+
 func doExchange(nc net.Conn, ours Handshake) (Handshake, error) {
 	if err := writeHandshake(nc, ours); err != nil {
 		return Handshake{}, fmt.Errorf("peer: writing handshake: %w", err)

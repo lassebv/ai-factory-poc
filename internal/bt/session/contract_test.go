@@ -1,6 +1,6 @@
 package session
 
-// FROZEN CONTRACT TESTS (ADR-0011). Owned by the architect. In-process,
+// FROZEN CONTRACT TESTS (ADR-0011, ADR-0017, ADR-0019). Owned by the architect. In-process,
 // loopback-only end-to-end checks of the Session against a fake HTTP tracker
 // and a raw-wire fake seeder written here (independent of package peer).
 
@@ -100,6 +100,7 @@ type fakeTracker struct {
 	mu    sync.Mutex
 	got   []announce
 	peers []peerAddr
+	dict  []string // "host:port"; when set, a dict peer list is served
 }
 
 type peerAddr struct {
@@ -118,8 +119,18 @@ func newTracker(t *testing.T) *fakeTracker {
 			compact = append(compact, p.ip[:]...)
 			compact = binary.BigEndian.AppendUint16(compact, p.port)
 		}
+		var dict []any
+		for _, hp := range ft.dict {
+			h, p, _ := net.SplitHostPort(hp)
+			n, _ := strconv.Atoi(p)
+			dict = append(dict, map[string]any{"ip": h, "port": n})
+		}
 		ft.mu.Unlock()
-		body, _ := bencode.Marshal(map[string]any{"interval": 1800, "peers": compact})
+		var peers any = compact
+		if dict != nil {
+			peers = dict
+		}
+		body, _ := bencode.Marshal(map[string]any{"interval": 1800, "peers": peers})
 		w.Write(body)
 	}))
 	t.Cleanup(ft.srv.Close)
@@ -172,10 +183,18 @@ type seeder struct {
 	handshakes  [][68]byte
 	badRequests []string
 	wg          sync.WaitGroup
+	corruptAll  bool // every block is corrupted
+	stall       bool // requests are accepted and never answered
+	conns       int
+	cancels     int
 }
 
 func newSeeder(t *testing.T, tt *testTorrent, corrupt ...int) *seeder {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return newSeederAt(t, "127.0.0.1:0", tt, corrupt...)
+}
+
+func newSeederAt(t *testing.T, addr string, tt *testTorrent, corrupt ...int) *seeder {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +229,7 @@ func (s *seeder) serve(c net.Conn) {
 	}
 	s.mu.Lock()
 	s.handshakes = append(s.handshakes, hs)
+	s.conns++
 	s.mu.Unlock()
 	if hs[0] != 19 || string(hs[1:20]) != "BitTorrent protocol" || !bytes.Equal(hs[28:48], s.tt.mi.InfoHash[:]) {
 		return
@@ -244,6 +264,10 @@ func (s *seeder) serve(c net.Conn) {
 			return
 		}
 		switch m[0] {
+		case 8:
+			s.mu.Lock()
+			s.cancels++
+			s.mu.Unlock()
 		case 2:
 			c.Write(msg(1, nil))
 		case 6:
@@ -257,6 +281,15 @@ func (s *seeder) serve(c net.Conn) {
 				continue
 			}
 			block := bytes.Clone(s.tt.piece(int(idx))[begin : begin+length])
+			s.mu.Lock()
+			stall := s.stall
+			if s.corruptAll {
+				block[0] ^= 0xff
+			}
+			s.mu.Unlock()
+			if stall {
+				continue
+			}
 			s.mu.Lock()
 			if s.corruptOnce[int(idx)] && begin == 0 {
 				delete(s.corruptOnce, int(idx))
