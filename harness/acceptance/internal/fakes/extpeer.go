@@ -105,9 +105,9 @@ type ExtPeer struct {
 	opts ExtPeerOptions
 	ln   net.Listener
 
-	mu    sync.Mutex
-	st    ExtStats
-	conns []net.Conn
+	mu     sync.Mutex
+	st     ExtStats
+	conns  []net.Conn
 	notify chan struct{}
 }
 

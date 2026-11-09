@@ -109,7 +109,6 @@ func (t *Tracker) Scrapes() []Scrape {
 	return append([]Scrape(nil), t.scrapes...)
 }
 
-
 // Close stops the tracker.
 func (t *Tracker) Close() { t.Server.Close() }
 
