@@ -41,6 +41,14 @@ var (
 func Binary(t testing.TB) string {
 	t.Helper()
 	buildOnce.Do(func() {
+		// Harness self-validation only (never set by the gate): run the
+		// suites against another implementation of the CLI/HTTP contract,
+		// e.g. the libtorrent shim in harness/oracle (see
+		// acceptance/discovery/VALIDATION.md).
+		if bin := os.Getenv("HARNESS_TORRENTD_BIN"); bin != "" {
+			binPath = bin
+			return
+		}
 		root := RepoRoot()
 		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 			buildErr = errors.New("no go.mod at the repo root: the product module does not exist yet")

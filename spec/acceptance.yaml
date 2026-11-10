@@ -105,8 +105,8 @@
   src: "§14.9"
   ms: 5
   tier: L4
-  text: "Peers are discovered via HTTP trackers, UDP trackers, DHT, PEX and LSD, and each peer's `source` is reported correctly."
-  check: {go: ./tools/swarm, run: TestDiscoverySources}
+  text: "Peers are discovered via every source: within 60 s torrentd connects to the peer named by an HTTP tracker, a UDP tracker, DHT get_peers, a PEX message, an LSD announce and a magnet's x.pe, and accepts incoming connections. (Reporting each peer's `source` is SRC-01, M6.)"
+  check: {go: ./acceptance/discovery, module: harness, run: TestDiscoverySources}
 
 - id: AC-10
   src: "§14.10, T4, C2"
@@ -668,132 +668,230 @@
   check: {script: harness/checks/test-race.sh}
 
 # ───────────────────────── M5 Discovery ─────────────────────────
+# Black-box: harness/acceptance/discovery (fakes validated against libtorrent
+# in harness/acceptance/oraclecheck). See harness/acceptance/discovery/VALIDATION.md.
+# Every negative check has a positive control in the same instance.
 
 - id: UDP-01
-  src: "§4.1 UDP trackers, D8, T1"
+  src: "§4.1 UDP trackers, BEP 15, C5, D13"
   ms: 5
   tier: L3
-  text: "UDP connect, announce and scrape with transaction IDs and connection-ID expiry; retransmits at 15·2ⁿ s (n ≤ 8) when packets are dropped (fake clock)."
-  check: {go: ./internal/bt/tracker, run: TestUDPTracker}
+  text: "A torrent whose only tracker is udp:// downloads from the peers it returns. connect carries the BEP 15 protocol id; a reply with a wrong transaction id (sent before every real reply) is ignored; every announce uses a connection id the tracker issued and comes from the peer port; started, completed and stopped announces carry the info-hash, a -TD0100- peer id, port = peer port, one key per session, left = size at start and left = 0 / downloaded ≥ size at completion."
+  check: {go: ./acceptance/discovery, module: harness, run: TestUDPTrackerAnnounce}
 
 - id: UDP-02
   src: "§6.2, D8"
   ms: 5
   tier: L3
-  text: "At shutdown the `stopped` announce is a single attempt that finishes within the 3 s budget."
-  check: {go: ./internal/bt/tracker, run: TestShutdownAnnounce}
+  text: "With a UDP tracker that stops answering, SIGTERM leads to exactly one stopped announce packet within 3.5 s of the signal (no retries, no new connect: the connection id is < 1 min old) and an exit with code 0 within 10 s."
+  check: {go: ./acceptance/discovery, module: harness, run: TestUDPStoppedAnnounceSingleAttempt}
 
-- id: UDPMUX-01
-  src: "§6.1, C5"
+- id: UDP-03
+  src: "§4.1 UDP trackers, D8"
   ms: 5
   tier: L3
-  text: "There is one UDP socket per address family; KRPC packets and tracker replies are demultiplexed correctly."
-  check: {go: ./internal/bt/session, run: TestUDPDemux}
+  text: "Retransmission follows BEP 15: with the first two connect requests dropped, the second comes 14–20 s after the first (15·2⁰) and the third 28–38 s after the second (15·2¹); the announce follows once the third is answered."
+  timeout: 5m
+  check: {go: ./acceptance/discovery, module: harness, run: TestUDPRetransmitBackoff}
+
+- id: UDP-04
+  src: "§4.1 UDP trackers (connection-ID expiry), A10"
+  ms: 5
+  tier: L3
+  text: "A connection id is reused while younger than 1 minute (the scrape after the first announce uses it, with no second connect) and not used once older: when a seeder connects in 62 s after the first connect, the completed announce uses a connection id less than 60 s old."
+  timeout: 5m
+  check: {go: ./acceptance/discovery, module: harness, run: TestUDPConnectionIDExpiry}
+
+- id: UDPMUX-01
+  src: "§6.1, C5, ADR-0020 §2"
+  ms: 5
+  tier: L3
+  text: "One UDP socket on the peer port carries both DHT and UDP tracker traffic: KRPC queries and tracker requests come from the peer port, 20 pings to the peer port are all answered with the node id torrentd's own queries use, and the UDP-tracker download completes meanwhile."
+  check: {go: ./acceptance/discovery, module: harness, run: TestSharedUDPSocket}
 
 - id: MT-01
   src: "§4.1 BEP 12, A4"
   ms: 5
-  tier: L1
-  text: "Tiers are tried in order, shuffled within each tier, and a responding tracker is promoted to the front of its tier."
-  check: {go: ./internal/bt/tracker, run: TestTiers}
+  tier: L3
+  text: "Eight torrents with tiers [[F1 F2 F3 OK] [C]] (F* answer HTTP 503, OK has interval=10): the first tracker tried is not the same for all eight (shuffle), no failing tracker is contacted again after OK first responds over ≥3 announces (promotion), and tier 1 is never contacted."
+  check: {go: ./acceptance/discovery, module: harness, run: TestTierOrderShuffleAndPromotion}
+
+- id: MT-02
+  src: "§4.1 BEP 12"
+  ms: 5
+  tier: L3
+  text: "When both tier-0 trackers fail (HTTP 503/500), tier 1 is tried only after both were tried, and the torrent downloads from the tier-1 tracker's peer."
+  check: {go: ./acceptance/discovery, module: harness, run: TestNextTierAfterTierFails}
 
 - id: SCR-01
-  src: "§4.1 Scrape, A10"
+  src: "§4.1 Scrape, BEP 48, A10, D14"
   ms: 5
   tier: L3
-  text: "Scrape runs every 30 min and once after the first announce (HTTP and UDP); the HTTP scrape URL follows the BEP 48 rule, and there is no scrape when it can't be derived."
-  check: {go: ./internal/bt/tracker, run: TestScrape}
+  text: "After the first announce, the HTTP tracker is scraped at /scrape (derived from /announce) with the torrent's info_hash, exactly once in the following ~20 s, and swarmSeeders/swarmLeechers show the scraped 40/17 (the announce said 1/0)."
+  check: {go: ./acceptance/discovery, module: harness, run: TestHTTPScrape}
+
+- id: SCR-02
+  src: "§4.1 Scrape, BEP 15, A10, D14"
+  ms: 5
+  tier: L3
+  text: "After the first announce, the UDP tracker is scraped with the torrent's info-hash and a valid connection id, and swarmSeeders/swarmLeechers show the scraped 40/17 (the announce said 1/0)."
+  check: {go: ./acceptance/discovery, module: harness, run: TestUDPScrape}
+
+- id: SCR-03
+  src: "A10, BEP 48, D14"
+  ms: 5
+  tier: L3
+  text: "A tracker at /x/tracker.php (scrape URL not derivable) is never scraped and gets no request on any other path; swarmSeeders/swarmLeechers come from its announce response (9/4). Control: a torrent on a /announce tracker in the same instance is scraped."
+  check: {go: ./acceptance/discovery, module: harness, run: TestNoScrapeWhenNotDerivable}
 
 - id: DHT-01
-  src: "§4.1 DHT, §13"
+  src: "§4.1 DHT (k=8, splitting)"
   ms: 5
-  tier: L1
-  text: "The routing table uses k=8 buckets with correct splitting."
-  check: {go: ./internal/bt/dht, run: TestBucketSplitting}
+  tier: L3
+  text: "Routing table: torrentd learns (and queries) 8 nodes near its id and 16 far ones; find_node for a target next to its id returns ≥ 6 of the near nodes and for a far target 8 nodes from the far half; no response has more than 8 nodes. A single unsplit bucket fails one of the two."
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTRoutingTableSplits}
 
 - id: DHT-02
-  src: "§13"
+  src: "§4.1 DHT, §13"
   ms: 5
   tier: L3
-  text: "A 50-node in-process DHT network on loopback finds announced peers for an info-hash."
-  check: {go: ./internal/bt/dht, run: TestFiftyNodeNetwork}
+  text: "Iterative lookup over 50 fake nodes (node k shares 3k bits with the info-hash and knows only k+1…k+8; only 46–49 know the seeder): from the bootstrap node torrentd reaches the holders with get_peers (≥ 5 nodes queried), and downloads from the DHT-found seeder, its only source. All KRPC comes from the peer port with a 20-byte id."
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTLookupFindsPeers}
 
 - id: DHT-03
-  src: "§4.1, T1"
-  ms: 5
-  tier: L1
-  text: "Tokens rotate every 5 min; tokens from the previous period are still accepted, older ones are rejected (fake clock)."
-  check: {go: ./internal/bt/dht, run: TestTokenRotation}
-
-- id: DHT-04
-  src: "G3"
+  src: "§4.1 DHT tokens, T1"
   ms: 5
   tier: L3
-  text: "Node IDs and routing tables persist across restarts; the stored table is discarded if the node ID is missing."
-  check: {go: ./internal/bt/dht, run: TestPersistence}
+  text: "torrentd's get_peers answers carry a token; announce_peer with that token is accepted and the peer is returned to another node's get_peers; a forged token gets a KRPC error and is not stored. (5-min rotation is not observed black-box; see VALIDATION.md.)"
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTTokens}
+
+- id: DHT-04
+  src: "G3, §6.2 step 3"
+  ms: 5
+  tier: L3
+  text: "After a graceful shutdown, settings has dht_node_id_v4 and dht_nodes is non-empty; restarted with no usable bootstrap, torrentd contacts nodes from the stored table using only the persisted id; with dht_node_id_v4 deleted, it uses a new id and contacts none of the old nodes for 15 s."
+  timeout: 5m
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTPersistence}
 
 - id: DHT-05
   src: "§4.1 IPv6, C5"
-  ms: 5
+  ms: 8
   tier: L3
-  text: "IPv4 and IPv6 have separate routing tables, and `nodes6` and `want` are handled."
+  text: "IPv4 and IPv6 have separate routing tables, and `nodes6` and `want` are handled. (IPv6 DHT is M8; to be refined black-box before M8.)"
   check: {go: ./internal/bt/dht, run: TestIPv6Tables}
 
 - id: DHT-06
-  src: "§11 robustness"
+  src: "§11 robustness, BEP 5"
   ms: 5
-  tier: L2
-  text: "Fuzz: KRPC message handling never panics."
-  check: {fuzz: ./internal/bt/dht, target: FuzzKRPC, time: 30s}
+  tier: L3
+  text: "An unknown KRPC method gets an error response; after ~3,400 random, truncated, deeply nested and mistyped packets on the peer port (rate-limiting or blocking the sender is allowed), /healthz answers and the DHT still looks up a newly added torrent at the bootstrap node with well-formed queries."
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTMalformedPackets}
+
+- id: DHT-07
+  src: "§4.1 DHT (KRPC server side)"
+  ms: 5
+  tier: L3
+  text: "torrentd answers KRPC on the peer port: ping and find_node return the same 20-byte id and valid compact nodes; get_peers returns peers stored by announce_peer, including implied_port=1 (the sender's UDP port)."
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTAnswersQueries}
+
+- id: DHT-08
+  src: "D5"
+  ms: 5
+  tier: L3
+  text: "Within 60 s of adding a (seeding) non-private torrent, announce_peer with a valid token and port = peer port (or implied_port) reaches the 3 nodes closest to its info-hash."
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTAnnouncePeer}
+
+- id: DHT-09
+  src: "ADR-0020 §1, D4, T3"
+  ms: 5
+  tier: L3
+  text: "--dht-bootstrap replaces the bootstrap list and beats TORRENTD_DHT_BOOTSTRAP; --dht-bootstrap= (empty) means no bootstrap traffic while the DHT still answers ping; TORRENTD_DHT_BOOTSTRAP alone is used."
+  check: {go: ./acceptance/discovery, module: harness, run: TestDHTBootstrapConfig}
+
+- id: EXT-01
+  src: "§4.1 BEP 10, ADR-0020 §4, D1, D13"
+  ms: 5
+  tier: L3
+  text: "torrentd sets reserved bit 20 and, on outgoing and incoming connections to BEP 10 peers, sends an extended handshake with m.ut_metadata and m.ut_pex (distinct, positive), v = \"torrentd 0.1.0\", p = peer port (optional on incoming connections, BEP 10), reqq = 250, metadata_size = info-dict size and yourip = 127.0.0.1; extension messages use the peer's own ids; a peer without bit 20 gets no extended messages."
+  check: {go: ./acceptance/discovery, module: harness, run: TestExtendedHandshake}
 
 - id: PEX-01
-  src: "§4.1 PEX, D3"
+  src: "§4.1 PEX, BEP 11"
   ms: 5
   tier: L3
-  text: "At most one PEX message per minute per peer, at most 50 added and 50 dropped per message, flags honored, added6 supported."
-  check: {go: ./internal/bt/peer, run: TestPEX}
+  text: "The tracker returns only an introducer with no pieces; its ut_pex names a seeder nobody else knows; torrentd connects to that seeder and downloads from it."
+  check: {go: ./acceptance/discovery, module: harness, run: TestPEXReceive}
+
+- id: PEX-02
+  src: "§4.1 PEX, BEP 11, D3"
+  ms: 5
+  tier: L3
+  text: "torrentd sends ut_pex: within 90 s of connecting, A's messages add tracker peers B and C at their listen addresses with flag 0x02 for the seed B only; after C leaves and D connects in, a later message drops C and adds D (listen or connection address); consecutive messages to A are ≥ 55 s apart and have ≤ 50 added / ≤ 50 dropped."
+  timeout: 8m
+  check: {go: ./acceptance/discovery, module: harness, run: TestPEXSend}
 
 - id: LSD-01
-  src: "§4.1 LSD, D6, T3"
+  src: "§4.1 LSD, BEP 14, D6, ADR-0020 §1"
   ms: 5
   tier: L3
-  text: "LSD announces and receives over an injectable transport; it is disabled when lsd_enabled=false."
-  check: {go: ./internal/bt/lsd, run: TestLSD}
+  text: "With --lsd-addr and --lsd-interface (loopback), torrentd multicasts a well-formed BT-SEARCH for an active torrent within 30 s of adding it, from 127.0.0.1, with Host = the group, Port = peer port and the hex info-hash; at most one more for that torrent in the next 45 s."
+  check: {go: ./acceptance/discovery, module: harness, run: TestLSDAnnounce}
+
+- id: LSD-02
+  src: "§4.1 LSD, BEP 14, ADR-0020 §1"
+  ms: 5
+  tier: L3
+  text: "A BT-SEARCH on the TORRENTD_LSD_ADDR group naming a torrent and a seeder's port makes torrentd connect to that seeder at the sender's address and download from it."
+  check: {go: ./acceptance/discovery, module: harness, run: TestLSDReceive}
 
 - id: PRIV-01
-  src: "§4.1 BEP 27, §14.9"
+  src: "§4.1 BEP 27, ADR-0020 §5, §14.9"
   ms: 5
   tier: L4
-  text: "A private torrent uses only its own trackers: no DHT, PEX or LSD traffic for its info-hash."
-  check: {go: ./tools/swarm, run: TestPrivateTrackersOnly}
+  text: "Over 40 s, for a private .torrent: no get_peers/announce_peer, no LSD announce, no connection to a peer announced for it over LSD, no ut_pex in its extended handshakes and no ut_pex messages; it still downloads from its tracker. Control in the same instance: a public torrent is looked up in the DHT, announced over LSD and uses an LSD-announced peer."
+  check: {go: ./acceptance/discovery, module: harness, run: TestPrivateTorrentNoDHTPEXLSD}
 
 - id: PRIV-02
-  src: "G15, ADR-0007"
+  src: "G15, ADR-0007, ADR-0020 §3"
   ms: 5
-  tier: L3
-  text: "When a magnet resolves to a private torrent, dht/pex/lsd peers are disconnected and DHT/PEX/LSD stop for that torrent."
-  check: {go: ./internal/bt/session, run: TestPrivateMagnetLockdown}
+  tier: L4
+  text: "A magnet whose only metadata source is a DHT-found peer (which also introduces a PEX peer; another peer is announced over LSD) resolves to private=1: within 10 s every dht/pex/lsd connection is closed and none is reopened; afterwards no get_peers/announce_peer or LSD announce for the info-hash and no connection to a newly LSD-announced peer; the download completes from the tracker's peer. (Using PEX/LSD during metadata is optional.)"
+  check: {go: ./acceptance/discovery, module: harness, run: TestPrivateMagnetLockdown}
 
 - id: MAG-03
-  src: "§4.1 Magnet, §13, T6"
+  src: "§4.1 Magnet, BEP 9, ADR-0020 §3"
   ms: 5
   tier: L3
-  text: "ut_metadata fetches metadata from a fake peer and verifies it against the info-hash; metadata_size over 10 MiB is rejected."
-  check: {go: ./internal/bt/peer, run: TestUTMetadata}
+  text: "POST with a magnet (no dn, no tr, one x.pe) returns 201 in state metadata with hasMetadata=false and sizeBytes=null; torrentd fetches all 3 ut_metadata pieces, then GET shows name, size and all 400 files, and the download completes with correct data."
+  check: {go: ./acceptance/discovery, module: harness, run: TestMagnetMetadataFetch}
 
 - id: MAG-04
   src: "T6"
   ms: 5
   tier: L3
-  text: "A bitfield received before the metadata is buffered (≤ 256 KiB) and validated once the metadata arrives."
-  check: {go: ./internal/bt/session, run: TestEarlyBitfield}
+  text: "A bitfield sent before the metadata arrives is kept: a seeder without BEP 10 that sent it right after the handshake (before the metadata, which another peer delays) serves the whole download on that first connection; a peer whose early bitfield is one byte too long is disconnected once the metadata arrives and gets no requests."
+  check: {go: ./acceptance/discovery, module: harness, run: TestEarlyBitfield}
 
-- id: EXT-01
-  src: "§4.1 BEP 10, D1, D13"
+- id: MAG-05
+  src: "§4.1 Magnet, T6"
   ms: 5
-  tier: L1
-  text: "The extended handshake has m, v ('torrentd 0.1.0'), p, yourip, reqq=250 and metadata_size."
-  check: {go: ./internal/bt/peer, run: TestExtendedHandshake}
+  tier: L3
+  text: "Metadata is verified and capped: from a peer serving corrupted metadata torrentd fetches all pieces but stays in metadata; from a peer advertising metadata_size = 10 MiB + 1 it requests nothing; a good peer that then connects in resolves the magnet and the download completes."
+  check: {go: ./acceptance/discovery, module: harness, run: TestMagnetMetadataVerified}
+
+- id: MAG-06
+  src: "G14, §16.7"
+  ms: 5
+  tier: L3
+  text: "A .torrent added for a magnet still in metadata returns 409 already_exists (AlreadyExists schema) with the id, supplies the metadata, and merges its tracker: torrentd announces there and downloads from its peer."
+  check: {go: ./acceptance/discovery, module: harness, run: TestTorrentFileCompletesMagnet}
+
+- id: SRC-01
+  src: "§14.9, D11, §8.4"
+  ms: 6
+  tier: L3
+  text: "Each connected peer in GET /api/v1/torrents/{id} (TorrentDetail.peers) has the source that found it: tracker, dht, pex, lsd, magnet (x.pe) or incoming. Same setup as AC-09."
+  check: {go: ./acceptance/discovery, module: harness, run: TestPeerSourcesReported}
 
 # ───────────────────────── M6 Live stats + API ─────────────────────────
 

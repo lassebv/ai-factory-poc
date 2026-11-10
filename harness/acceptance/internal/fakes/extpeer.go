@@ -70,6 +70,9 @@ type ExtPeerOptions struct {
 	PEX     bool
 	SendPEX []PEXEntry
 
+	// Choke keeps torrentd choked forever (a peer that never serves).
+	Choke bool
+
 	// Listen is the listen address (default 127.0.0.1:0).
 	Listen string
 	// PeerID (20 bytes) defaults to "-FX0001-" + digits.
@@ -95,6 +98,7 @@ type ExtStats struct {
 	MsgCounts      map[byte]int // every message id torrentd sent
 	ClosedByRemote []time.Time  // torrentd closed a connection
 	BadMessages    []string
+	DialedFrom     []netip.AddrPort // local addresses of connections this peer dialed
 }
 
 // ExtPeer is a scriptable BEP 3 + BEP 10 peer for one torrent. It listens,
@@ -149,6 +153,8 @@ func (p *ExtPeer) Dial(addr string) error {
 	if err != nil {
 		return err
 	}
+	local := c.LocalAddr().(*net.TCPAddr).AddrPort()
+	p.update(func(s *ExtStats) { s.DialedFrom = append(s.DialedFrom, local) })
 	go p.serve(c, true)
 	return nil
 }
@@ -175,6 +181,7 @@ func (p *ExtPeer) Stats() ExtStats {
 	s.PEX = append([]PEXMsg(nil), s.PEX...)
 	s.ClosedByRemote = append([]time.Time(nil), s.ClosedByRemote...)
 	s.BadMessages = append([]string(nil), s.BadMessages...)
+	s.DialedFrom = append([]netip.AddrPort(nil), s.DialedFrom...)
 	s.MsgCounts = map[byte]int{}
 	for k, v := range p.st.MsgCounts {
 		s.MsgCounts[k] = v
@@ -371,7 +378,7 @@ func (p *ExtPeer) serve(c net.Conn, dialed bool) {
 		switch msg[0] {
 		case 2: // interested
 			p.update(func(s *ExtStats) { s.Interested++ })
-			if !p.opts.HasNone {
+			if !p.opts.HasNone && !p.opts.Choke {
 				send(1, nil)
 			}
 		case 6: // request

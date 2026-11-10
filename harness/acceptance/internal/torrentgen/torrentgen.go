@@ -282,7 +282,9 @@ func (t *Torrent) Magnet(trackers []string, peers []string) string {
 		s += "&tr=" + url.QueryEscape(tr)
 	}
 	for _, p := range peers {
-		s += "&x.pe=" + url.QueryEscape(p)
+		// Literal host:port, as real-world magnets carry it (libtorrent,
+		// for one, does not percent-decode x.pe).
+		s += "&x.pe=" + p
 	}
 	return s
 }

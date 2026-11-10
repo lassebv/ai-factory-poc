@@ -108,7 +108,7 @@ type DHTNode struct {
 	queries []KRPCQuery
 	// Contacts returns the nodes this node reports for a target (find_node,
 	// and get_peers when it has no values). Nil means "no nodes".
-	contacts func(target [20]byte) []NodeInfo
+	contacts func(q KRPCQuery) []NodeInfo
 	values   map[[20]byte][]netip.AddrPort
 	stored   map[[20]byte][]netip.AddrPort // from announce_peer with a valid token
 	pending  map[string]chan map[string]any
@@ -141,8 +141,25 @@ func (n *DHTNode) Close() { n.conn.Close() }
 
 // SetContacts sets the function that picks the nodes this node reports.
 func (n *DHTNode) SetContacts(f func(target [20]byte) []NodeInfo) {
+	n.SetQueryContacts(func(q KRPCQuery) []NodeInfo {
+		var t [20]byte
+		copy(t[:], q.Target)
+		return f(t)
+	})
+}
+
+// SetQueryContacts is SetContacts with access to the whole query (for
+// example the querying node's id). f runs on the node's receive goroutine.
+func (n *DHTNode) SetQueryContacts(f func(q KRPCQuery) []NodeInfo) {
 	n.mu.Lock()
 	n.contacts = f
+	n.mu.Unlock()
+}
+
+// SetID changes the node's id (before anyone has learned about the node).
+func (n *DHTNode) SetID(id [20]byte) {
+	n.mu.Lock()
+	n.ID = id
 	n.mu.Unlock()
 }
 
@@ -254,18 +271,21 @@ func (n *DHTNode) handle(b []byte, from netip.AddrPort) {
 	}
 	n.mu.Lock()
 	silent, contactsFn := n.silent, n.contacts
+	n.mu.Unlock()
+	var contacts []NodeInfo
+	if contactsFn != nil {
+		contacts = contactsFn(q)
+	}
+	n.mu.Lock()
 	var target [20]byte
 	copy(target[:], q.Target)
 	resp := map[string]any{"id": string(n.ID[:])}
+	_ = target
 	errCode := 0
 	switch method {
 	case "ping":
 	case "find_node":
-		if contactsFn != nil {
-			resp["nodes"] = CompactNodes(contactsFn(target))
-		} else {
-			resp["nodes"] = ""
-		}
+		resp["nodes"] = string(CompactNodes(contacts))
 	case "get_peers":
 		resp["token"] = n.token(from)
 		if vals := append(n.values[target], n.stored[target]...); len(vals) > 0 {
@@ -275,8 +295,8 @@ func (n *DHTNode) handle(b []byte, from netip.AddrPort) {
 			}
 			resp["values"] = list
 		}
-		if contactsFn != nil {
-			resp["nodes"] = CompactNodes(contactsFn(target))
+		if len(contacts) > 0 {
+			resp["nodes"] = CompactNodes(contacts)
 		}
 	case "announce_peer":
 		tok, _ := args["token"].(string)
