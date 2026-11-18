@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,4 +260,31 @@ func (t *Torrent) Verify(downloadDir string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// InfoBytes returns the exact bencoded info dict (what ut_metadata serves).
+func (t *Torrent) InfoBytes() ([]byte, error) {
+	_, info, err := benc.Decode(t.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, errors.New("torrentgen: no info dict")
+	}
+	return info, nil
+}
+
+// Magnet returns a BEP 9 magnet URI for the torrent with the given tr and
+// x.pe parameters (no dn, so the name must come from the metadata).
+func (t *Torrent) Magnet(trackers []string, peers []string) string {
+	s := "magnet:?xt=urn:btih:" + t.ID()
+	for _, tr := range trackers {
+		s += "&tr=" + url.QueryEscape(tr)
+	}
+	for _, p := range peers {
+		// Literal host:port, as real-world magnets carry it (libtorrent,
+		// for one, does not percent-decode x.pe).
+		s += "&x.pe=" + p
+	}
+	return s
 }

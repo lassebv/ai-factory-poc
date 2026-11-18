@@ -41,6 +41,14 @@ var (
 func Binary(t testing.TB) string {
 	t.Helper()
 	buildOnce.Do(func() {
+		// Harness self-validation only (never set by the gate): run the
+		// suites against another implementation of the CLI/HTTP contract,
+		// e.g. the libtorrent shim in harness/oracle (see
+		// acceptance/discovery/VALIDATION.md).
+		if bin := os.Getenv("HARNESS_TORRENTD_BIN"); bin != "" {
+			binPath = bin
+			return
+		}
 		root := RepoRoot()
 		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 			buildErr = errors.New("no go.mod at the repo root: the product module does not exist yet")
@@ -131,6 +139,10 @@ type Instance struct {
 	Addr    string // host:port used for requests
 	DataDir string // the --data-dir passed (empty in Raw mode)
 	Home    string
+	// LSDGroup is the TORRENTD_LSD_ADDR this instance got by default (a
+	// private port on the BEP 14 group, so parallel instances never hear
+	// each other). Tests may override it through Options.Env.
+	LSDGroup string
 
 	cmd  *exec.Cmd
 	logs *syncBuffer
@@ -215,8 +227,10 @@ func start(bin string, opts Options) (*Instance, error) {
 		return nil, errors.New("app: Raw mode requires ReadyAddr")
 	}
 
+	inst.LSDGroup = hermeticLSDGroup()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(append(cleanEnv(), "HOME="+home, "APPDATA="+filepath.Join(home, "AppData")), opts.Env...)
+	cmd.Env = append(append(cleanEnv(), "HOME="+home, "APPDATA="+filepath.Join(home, "AppData")), hermeticEnv(inst.LSDGroup)...)
+	cmd.Env = append(cmd.Env, opts.Env...) // later entries win (os/exec keeps the last duplicate)
 	cmd.Stdout = inst.logs
 	cmd.Stderr = inst.logs
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
