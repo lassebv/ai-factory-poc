@@ -36,11 +36,14 @@ agent() { # name role budget [model]
   local out="$RUN/$1"; mkdir -p "$out"; date -u +%Y-%m-%dT%H:%M:%SZ > "$out/started_at"
   local m=(); [ -n "${4:-}" ] && m=(--model "$4")
   set +e
-  (cd "$WT" && FACTORY_ROLE="$2" "${AWAKE[@]}" claude -p "$(cat "$out/prompt.md")" "${m[@]}" --permission-mode auto \
+  # ${a[@]+"${a[@]}"}: bash 3.2 treats an empty array as unbound under set -u.
+  (cd "$WT" && FACTORY_ROLE="$2" ${AWAKE[@]+"${AWAKE[@]}"} claude -p "$(cat "$out/prompt.md")" ${m[@]+"${m[@]}"} --permission-mode auto \
      --output-format stream-json --verbose --max-budget-usd "$3" -n "aplusr-m$MS-$1" > "$out/transcript.jsonl" 2> "$out/stderr.log")
   echo "exit=$?" > "$out/exit_code"; set -e
   date -u +%Y-%m-%dT%H:%M:%SZ > "$out/finished_at"
   tail -1 "$out/transcript.jsonl" | jq -r --arg n "$1" '"[\($n)] \(.subtype) turns=\(.num_turns) cost=$\(.total_cost_usd) \((.duration_ms/60000)|floor)min"' 2>/dev/null || true
+  # Fail unless the agent produced a result line that isn't an API or usage-limit error.
+  tail -1 "$out/transcript.jsonl" 2>/dev/null | jq -e '.type == "result"' >/dev/null 2>&1 || { echo "[$1] no result (see $out/stderr.log)" >&2; return 1; }
   ! tail -1 "$out/transcript.jsonl" | jq -e '.result // "" | (startswith("API Error") or startswith("You'"'"'ve hit"))' >/dev/null 2>&1
 }
 head_of() { git -C "$WT" rev-parse HEAD; }
