@@ -31,3 +31,16 @@ M5 adds peer discovery. Testing it black-box needs hermetic test hooks (T3): the
 
 - The verifier can build fake DHT nodes, a fake UDP tracker, PEX-capable fake peers and an LSD listener on loopback, and validate them against libtorrent.
 - The architect can rely on these hooks being part of the CLI contract.
+
+## Addendum (2026-11-18, human): clarifications from the M5 harness validation
+
+These come from the verifier's `harness/acceptance/discovery/VALIDATION.md` and are binding for M5.
+
+7. **No per-IP limits in the DHT.** The routing table and lookups must accept many nodes that share an IP but use different ports. The tests run every fake node on 127.0.0.1.
+8. **First announces happen at start.** A started torrent sends its first DHT `announce_peer` (D5) and its first LSD announce (D6) within 60 s of starting. After that, the periodic cadences in D5 and D6 apply.
+9. **Discovery during `metadata`.** A magnet in state `metadata` uses the DHT to find peers, and accepts incoming peer connections. PEX and LSD are optional in that state (ADR-0007). If the metadata turns out to be private, G15 applies from that moment on.
+10. **BEP 15 connection IDs** are cached and reused for up to 1 minute, then replaced.
+11. **The extended handshake** also contains `yourip`, as §4.1 says. `p` is required on outgoing connections only.
+12. **TorrentDetail at M5.** At M5 only `files` must be complete for a resolved magnet. The per-peer `source` field is M6 (SRC-01).
+
+**Not adopted:** a configurable IPv6 LSD group. The cross-talk the verifier identified is harmless, because test torrents have unique names.
